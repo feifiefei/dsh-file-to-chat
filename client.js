@@ -3163,8 +3163,14 @@ window.__ModuleLoader__.load({
         })
         card.addEventListener('click', function (e) { e.stopPropagation() })
 
+        // 一张卡片只允许发送一次。发送成功后卡片还会停 900ms 显示「已发送 ✓」，
+        // 这段时间里再敲一次 Enter 就会**再插一份**引用+批注（`send.disabled`
+        // 只挡按钮，挡不住 textarea 的 Enter 分支）。失败时解锁，允许重试。
+        var sent = false
         function doSend() {
+          if (sent) return
           if (snap === null) return
+          sent = true
           send.disabled = true
           try {
             var noteText = String(note.value === null || note.value === undefined ? '' : note.value).trim()
@@ -3179,6 +3185,7 @@ window.__ModuleLoader__.load({
             clearTimeout(flashTimer)
             flashTimer = setTimeout(clearAll, 900)
           } catch (err) {
+            sent = false
             send.disabled = false
             var msg = err !== null && err !== undefined && err.message !== undefined
               ? err.message : String(err)
@@ -3190,6 +3197,10 @@ window.__ModuleLoader__.load({
         send.addEventListener('mousedown', function (e) { e.preventDefault() })
         send.addEventListener('click', function (e) { e.preventDefault(); doSend() })
         note.addEventListener('keydown', function (e) {
+          // 卡片是挂在 body 上的浮层，按键会一路冒泡到 document。虽然正常情况
+          // 下输入焦点在我们的 textarea 里、composer 收不到，但把冒泡掐断成本
+          // 极低，能彻底排除「一次 Enter 同时被两边处理」这类耦合。
+          e.stopPropagation()
           if (e.key === 'Enter' && e.shiftKey !== true) {
             e.preventDefault()
             doSend()
