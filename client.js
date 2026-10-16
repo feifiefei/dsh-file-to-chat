@@ -1185,9 +1185,15 @@ window.__ModuleLoader__.load({
               var at = typeof st.draft === 'string' ? st.draft.length : 0
               var cs = null
               try { cs = typeof shell.caretSpan === 'function' ? shell.caretSpan() : null } catch (_) { cs = null }
+              // `insertReference` 的语义是「用胶囊**替换**这个 span」。光标若落在
+              // 一个选区上，被选中的草稿内容会被替换掉甚至删掉 —— 那不是用户要的。
+              // 一律收敛成零宽点（取选区末端），宁可插偏也不删东西。
+              var csStart = cs !== null && cs !== undefined && typeof cs.start === 'number' ? cs.start : at
+              var csEnd = cs !== null && cs !== undefined && typeof cs.end === 'number' ? cs.end : at
+              if (csStart !== csEnd) csStart = csEnd
               var span = {
-                start: cs !== null && cs !== undefined && typeof cs.start === 'number' ? cs.start : at,
-                end: cs !== null && cs !== undefined && typeof cs.end === 'number' ? cs.end : at,
+                start: csStart,
+                end: csEnd,
                 draftRev: st.draftRev,
               }
               // 草稿里已经有内容时先断一行再插胶囊 —— 否则第二条引用会紧贴在
@@ -1196,7 +1202,11 @@ window.__ModuleLoader__.load({
               // 输入域 CSS 是 white-space:pre-wrap，所以裸 \n 就能渲染成换行。
               var draftNow = typeof st.draft === 'string' ? st.draft : ''
               var prevChar = span.start > 0 ? draftNow.charAt(span.start - 1) : ''
-              if (span.start > 0 && draftNow !== '' && prevChar !== '\n' && bridge.inputActions) {
+              // 只在**零宽光标**上断行。光标若是一个选区（start !== end），
+              // insertText 会把选中的内容整个替换成换行 —— 那等于吃掉用户已经
+              // 插好的胶囊。宁可让两条引用挤在一行，也不能删东西。
+              if (span.start === span.end && span.start > 0 && draftNow !== '' &&
+                  prevChar !== '\n' && bridge.inputActions) {
                 var broke = false
                 try {
                   broke = bridge.inputActions.insertText('\n', {
@@ -1271,11 +1281,32 @@ window.__ModuleLoader__.load({
       }
 
       // ② 座位标准 prop（已实测可用）
+      //
+      // 这里有个**必须绕开的坑**：`setDraft` 会用纯文本重写整份草稿 —— 它会先
+      // 把占位符（`/[\uE100-\uE11D\uFFFC]/`）剥掉，再重建每一个段落。草稿里
+      // 已经插好的引用胶囊本身就靠占位符表示，于是**一并被抹掉**。
+      // 这正是「同时引用多个会吃掉后边的和备注」的成因：第二条引用在 chip 插入
+      // 被拒时落到这条兜底，把第一条连同它的批注一起清了。
+      // 所以：草稿里只要有胶囊，就绝不走 setDraft，改为在光标处追加纯文本。
       var ia = bridge.inputActions
-      if (ia !== null && ia !== undefined && typeof ia.setDraft === 'function') {
+      if (ia !== null && ia !== undefined) {
         var before = typeof bridge.draft === 'string' ? bridge.draft : ''
-        ia.setDraft(before !== '' ? before + '\n' + full : full)
-        return { via: 'inputActions.setDraft', sessionId: bridge.sessionId }
+        if (CHIP_MARK_RE.test(before) &&
+            typeof ia.captureInsertion === 'function' && typeof ia.insertText === 'function') {
+          var sp2 = null
+          try { sp2 = ia.captureInsertion() } catch (_) { sp2 = null }
+          if (sp2 !== null && sp2 !== undefined) {
+            var appended = false
+            try { appended = ia.insertText('\n' + full, sp2) !== false } catch (_) { appended = false }
+            if (appended) {
+              return { via: 'inputActions.insertText(append)', sessionId: bridge.sessionId }
+            }
+          }
+        }
+        if (typeof ia.setDraft === 'function') {
+          ia.setDraft(before !== '' ? before + '\n' + full : full)
+          return { via: 'inputActions.setDraft', sessionId: bridge.sessionId }
+        }
       }
 
       // ③ 兜底：内核 conversation 服务
@@ -1951,6 +1982,13 @@ window.__ModuleLoader__.load({
       }
 
       var out = ['> \uD83D\uDCC4 引用来源：' + where]
+
+      // 只发路径：正文留给模型自己去读。刻意不写成「正文未内联：<失败原因>」，
+      // 因为这里根本不是失败 —— 是我们要的行为。
+      if (snap.pathOnly === true) {
+        out.push('> （未内联正文，请自行读取上面的路径）')
+        return out
+      }
 
       // 取不到正文：docx/xlsx/pdf 不是 UTF-8 文本（宿主回 `workspace-file/not-text`），
       // 或者超了单页上限。这种只发来源行 —— 模型自己有读文件的工具，拿着路径能
@@ -2870,13 +2908,15 @@ window.__ModuleLoader__.load({
             openDirCard(path, x, y)
           }))
         } else if (entry === 'file') {
-          menu.appendChild(menuItem('发送到聊天', function () {
-            clearMenu()
-            openFileCard(path, x, y, '整份文件')
-          }))
-          menu.appendChild(menuItem('只发送路径', function () {
+          // 只发路径是**默认**动作：模型自己就能读文件，内联一份正文既费 token
+          // 又容易过期。要正文的场合（想固定住当时的内容）留成第二项。
+          menu.appendChild(menuItem('发送路径到聊天', function () {
             clearMenu()
             openPathCard(path, x, y)
+          }))
+          menu.appendChild(menuItem('发送内容到聊天', function () {
+            clearMenu()
+            openFileCard(path, x, y, '整份文件')
           }))
         }
         // 文件与目录都适用：文件交给它的关联程序（等同双击），目录交给文件管理器。
@@ -2946,7 +2986,7 @@ window.__ModuleLoader__.load({
        * 分两趟是有理由的：文本文件本地读很快，但 docx/xlsx 要走抽包、
        * 目录要走列举 —— 先画出来，用户才不会以为卡住了。
        */
-      function openLoadedCard(label, path, x, y, load) {
+      function openLoadedCard(label, path, x, y, load, extra) {
         var base = {
           kind: 'file',
           path: path,
@@ -2956,6 +2996,11 @@ window.__ModuleLoader__.load({
           meta: null,
           pending: true,
           top: y, bottom: y, left: x, right: x
+        }
+        if (extra !== null && extra !== undefined) {
+          for (var k in extra) {
+            if (Object.prototype.hasOwnProperty.call(extra, k)) base[k] = extra[k]
+          }
         }
         clearAll()
         snap = base
@@ -2977,11 +3022,18 @@ window.__ModuleLoader__.load({
         })
       }
 
-      /** 不读正文，只把路径本身当作要发送的内容 —— 大文件/二进制文件的安全选项。 */
+      /**
+       * 不发正文，只把路径本身交给模型 —— 让它自己按需去读。
+       *
+       * 这是文件引用的**默认**动作：内联正文只在「要固定住当时那份内容」时才有
+       * 意义，平时既费 token 又和磁盘上的实际内容可能不一致。`pathOnly` 让
+       * `composeTextBlock` 走一条不输出任何正文的支路（而不是把「读不到正文」
+       * 当成失败来报）。
+       */
       function openPathCard(path, x, y) {
         openLoadedCard('仅路径', path, x, y, function (done) {
-          done(path + '\n（仅发送路径，未读取正文）', null, { lines: null, bytes: null, eof: true, from: 'path' })
-        })
+          done(null, null, { lines: null, bytes: null, eof: true, from: 'path' })
+        }, { pathOnly: true })
       }
 
       function openDirCard(path, x, y) {
