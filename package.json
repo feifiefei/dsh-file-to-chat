@@ -1,0 +1,61 @@
+{
+  "name": "dsh-file-to-chat",
+  "version": "1.0.0",
+  "description": "Annotate a selection in the DeepSeek Harness right-sidebar document preview — text, Excel cell ranges, Word/PDF pages — and send the quote plus your note into the current chat. Adds a right-click file tree menu (send content, send path, copy path, open with the default application) and folds sent quotes into a capsule in the transcript.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "sidebar",
+    "annotation",
+    "quote",
+    "cite",
+    "workspace",
+    "excel",
+    "xlsx",
+    "docx",
+    "pdf"
+  ],
+  "homepage": "https://gitee.com/mofeo/dsh-file-to-chat",
+  "repository": {
+    "type": "git",
+    "url": "git+https://gitee.com/mofeo/dsh-file-to-chat.git"
+  },
+  "bugs": {
+    "url": "https://gitee.com/mofeo/dsh-file-to-chat/issues"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-sidebar-files"
+      ]
+    }
+  }
+}

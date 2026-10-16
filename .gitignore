@@ -1,0 +1,14 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output / tarballs
+artifacts/
+*.tgz
+
+# logs & editor
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
