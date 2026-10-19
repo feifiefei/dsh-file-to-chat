@@ -311,14 +311,22 @@ window.__ModuleLoader__.load({
         } catch (_) { return null }
       }
 
-      var fromPreview = pathFromPreview(startEl)
+      // 路径优先级：**宿主给的绝对路径** > 预览头部标签。
+      //
+      // 标签那份来自 `PathLabel`（`data-textpreview-path`），它是给眼睛看的
+      // 展示路径，可能被缩写/省略；`document.actions` 座位发下来的
+      // `absolutePath` 则是宿主自己认定的文件路径（源码：`const fileOwner =
+      // absolutePath === void 0 ? void 0 : { absolutePath }`），对模型才是无歧义的。
+      // 早先反过来以标签优先，理由只是「省掉一次 cwd 查询」—— 但这份引用块最终是
+      // 给模型读的，准确性优先。
       var fb = fallbackPath === null || fallbackPath === undefined ? '' : String(fallbackPath).trim()
+      var fromPreview = pathFromPreview(startEl)
 
       return {
         kind: 'text',
         text: text,
         range: range,
-        path: fromPreview !== null && fromPreview !== '' ? fromPreview : (fb === '' ? null : fb),
+        path: fb !== '' ? fb : (fromPreview !== null && fromPreview !== '' ? fromPreview : null),
         lineRange: lineRangeOf(range),
         pageRange: pageRangeOf(range),
         top: first.top,
@@ -2521,7 +2529,24 @@ window.__ModuleLoader__.load({
             continue
           }
           // ② 行级粗筛：整条气泡里一个 `> ` 行都没有就直接走人
-          if (!/^\s*>\s?/m.test(row.textContent || '')) continue
+          var rowText = row.textContent || ''
+          if (!/^\s*>\s?/m.test(rowText)) continue
+          // ②b 换行保护（防「整条消息被折进一枚胶囊」的静默数据丢失）。
+          //
+          // 本插件发出的引用块**至少两行**：`> 📄 引用来源：…` 加上至少一行正文
+          // （正文为空时也有一行 `> （…）`）。所以「含引用行**且**含换行」才是
+          // 我们的东西。
+          //
+          // 为什么现在要显式挡这一手：DSH 0.2.1 给用户正文的展示层加了一套可配置的
+          // 空白规则（dsh-client-ui-conversation 的 user-text/whitespace-rules.js：
+          // `collapseWhitespaceRule`（order 1010）把连续空白折成一个空格、
+          // `trimWhitespaceRule` 去首尾），由 `facts` 驱动。聊天气泡今天传的是
+          // `EMPTY_TEXT_FACTS = {}`，这两条规则**没有生效**、换行照旧保留 —— 但那是
+          // 内核的一行配置决定的。一旦哪天它对消息行启用，换行会在 DOM 里塌成空格、
+          // 整条消息变成一行，而「该行以 `> 📄 引用来源` 开头」依然成立：我们就会把
+          // **用户整条消息**折进一枚胶囊、正文被藏起来。宁可退回「不折、显示全文」，
+          // 也绝不吞掉内容。
+          if (rowText.indexOf('\n') < 0) continue
 
           // ③ 找「自身含引用行、但子元素都不含」的最深容器
           var targets = []
@@ -3483,10 +3508,63 @@ window.__ModuleLoader__.load({
       return { present: present, missing: missing }
     }
 
-    function startAnchorWatch() {
+    // DOM 锚点之外，插件还依赖一串 cordis 服务/方法名。它们同样是内部约定：DSH
+    // 改了名字或挪了层级，表现依旧是「功能悄悄没了」。这里做一次性能力普查 ——
+    // 只查**同步可判**的项（激活顺序不保证的服务不查，否则全是误报；`inputTriggers`
+    // 由 wireQuoteSource 自己用 ctx.inject + 重试兜住）。
+    var F2C_CAPS = [
+      ['会话服务', 'sessions', '当前会话 id 解析', function (ctx) { return ctx.get('sessions') !== undefined && ctx.get('sessions') !== null }],
+      ['座位服务', 'slots', '工具栏按钮', function (ctx) { return ctx.get('slots') !== undefined && ctx.get('slots') !== null }],
+      ['会话上下文', 'conversation', '草稿注入', function (ctx) { return ctx.get('conversation') !== undefined && ctx.get('conversation') !== null }],
+      ['草稿写入面', 'conversation.input.for', '注入兜底路径', function (ctx) {
+        var c = ctx.get('conversation')
+        return c !== undefined && c !== null && c.input !== undefined && c.input !== null && typeof c.input.for === 'function'
+      }],
+      ['会话作用域', 'uiSession', '会话 id 兜底', function (ctx) { return ctx.get('uiSession') !== undefined && ctx.get('uiSession') !== null }],
+      ['远端服务', 'remote', '读文件 / 右键菜单', function (ctx) { return ctx.get('remote') !== undefined && ctx.get('remote') !== null }],
+      ['工作区文件读', 'remote.workspaceFiles.read', '发送文件内容', function (ctx) {
+        var r = ctx.get('remote')
+        var w = r !== undefined && r !== null ? r.workspaceFiles : undefined
+        return w !== undefined && w !== null && (typeof w.read === 'function' || typeof w.readBytes === 'function')
+      }],
+      ['默认程序打开', 'remote.session.openWorkspacePath', '右键「用默认程序打开」', function (ctx) {
+        var r = ctx.get('remote')
+        var s = r !== undefined && r !== null ? r.session : undefined
+        return s !== undefined && s !== null && typeof s.openWorkspacePath === 'function'
+      }]
+    ]
+
+    function capabilityCensus(ctx) {
+      var missing = []
+      for (var i = 0; i < F2C_CAPS.length; i++) {
+        var ok = false
+        try { ok = F2C_CAPS[i][3](ctx) === true } catch (err) { ok = false }
+        if (!ok) missing.push(i)
+      }
+      return missing
+    }
+
+    function startAnchorWatch(ctx) {
       var everSeen = {}
       var lastLine = null
+      var capsChecked = false
+      var ticks = 0
       function tick() {
+        // 能力普查只跑一次，且**跳过第一次 tick** —— 首次 tick 在 apply() 里同步
+        // 执行，那时 `uiSession` 之类没写进 inject 的服务可能刚注册、还没就绪，
+        // 当场查会误报。等 5 秒后的第二次 tick，启动期该注册的都注册完了。
+        if (!capsChecked && ticks > 0 && ctx !== undefined && ctx !== null) {
+          capsChecked = true
+          try {
+            var miss = capabilityCensus(ctx)
+            for (var m = 0; m < miss.length; m++) {
+              var cap = F2C_CAPS[miss[m]]
+              console.warn('[file-to-chat] 能力缺失：「' + cap[0] + '」（`' + cap[1] + '`）在当前 DSH 上取不到。'
+                + '受影响的功能是「' + cap[2] + '」—— 多半是 DSH 改了服务名或层级，这个插件需要跟着更新。')
+            }
+            if (miss.length === 0) dbg('能力：' + F2C_CAPS.length + ' 项全部就绪')
+          } catch (err) { void err }
+        }
         var c = anchorCensus()
         var i
         for (i = 0; i < c.present.length; i++) everSeen[c.present[i]] = true
@@ -3506,7 +3584,8 @@ window.__ModuleLoader__.load({
         }
       }
       tick()
-      var timer = setInterval(tick, 5000)
+      ticks++
+      var timer = setInterval(function () { tick(); ticks++ }, 5000)
       return function () { clearInterval(timer) }
     }
 
@@ -3518,8 +3597,9 @@ window.__ModuleLoader__.load({
       wireQuoteSource(ctx)
 
       // 锚点自检：把「DSH 改约定导致功能静默失效」变成控制台里的一条告警。
+      // DOM 锚点 + 一次性的服务能力普查，两者都在这一个 effect 里。
       ctx.effect(function () {
-        return startAnchorWatch()
+        return startAnchorWatch(ctx)
       }, 'file-to-chat: anchor watch')
 
       // 划词浮层是全局单例：挂在 document.body 上，不随标签页切换卸载。

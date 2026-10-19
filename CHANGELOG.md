@@ -2,6 +2,32 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。日期为 `YYYY-MM-DD`。
 
+## [1.0.1] — 2026-10-19
+
+适配 **DSH Web `0.2.1-rc.2`** 并做了一轮自检修复。
+
+### 修复
+
+- **防静默数据丢失**：折叠已发送引用块时新增「换行保护」。DSH 0.2.1 给用户正文的展示层加了一套由 `facts` 驱动的空白规则（`collapseWhitespaceRule` / `trimWhitespaceRule`）；聊天气泡目前传的是 `EMPTY_TEXT_FACTS = {}`，这两条规则没有生效、换行照旧保留。但一旦内核改了这行配置，换行会在 DOM 里塌成空格、整条消息变成一行，而「该行以 `> 📄 引用来源` 开头」依然成立 —— 旧逻辑就会把**用户整条消息**折进一枚胶囊、正文被藏起来。现在要求目标行「含引用行**且**含换行」，宁可退回「不折、显示全文」。
+- **路径以宿主为准**：划词批注的来源路径改为**优先取 `document.actions` 座位发下来的 `absolutePath`**，`[data-textpreview-path]` 标签只作兜底。标签是给眼睛看的展示路径（可能被缩写），座位给的才是宿主认定的绝对路径 —— 这份引用块最终是给模型读的。
+
+### 新增
+
+- **能力普查**：锚点自检从「DOM 锚点」扩展到「cordis 服务能力」。启动 5 秒后一次性核对 8 项依赖（`sessions` / `slots` / `conversation` / `conversation.input.for` / `uiSession` / `remote` / `remote.workspaceFiles.read` / `remote.session.openWorkspacePath`），缺失项在控制台 `warn` 一次并写明受影响的功能。只查同步可判的项；激活顺序不保证的服务不查，避免误报。
+
+### 适配性核对（0.2.0-rc.2 → 0.2.1-rc.2，无需改动）
+
+逐段对照两个版本的出厂源码，以下契约**逐字节一致**：
+
+- `inputTriggers.registerSource` 契约、重名报错文案、返回 disposer。
+- `insertReference(span, ref, tail)` —— 连尾随空格规则都一样。
+- `$createReferenceChipNode` / `$replaceDetectSpanWithNodes` / `insertAsyncText` 与占位符正则 `REFERENCE_PLACEHOLDER_RE`。
+- `serializeReference` / `codec.serialize` / `conversation.input.for` / `caretSpan` / `slash/input-insert-reference` 事件通道。
+- `remote.session.openWorkspacePath`、`remote.workspaceFiles.read` 的分页与错误码（`not-text` / `too-large` …）。
+- 输入域与消息气泡的 `white-space: pre-wrap`。
+- 23 个依赖的 DOM 锚点全部健在（`data-document-preview`、`data-textpreview-*`、`data-pdf-page`、`.fortune-name-box`、`data-files-*`、`data-chat-flow-kind` …）。
+- 座位 `sidebar.right.tab.document.actions` / `files.actions` 的 `standardProps`（新增 `useAccess` 系列，`inputActions` 与 `sessionId` 仍在）。
+
 ## [1.0.0] — 2026-10-15
 
 首个公开版本。开发与验证均在 **DSH Web `0.2.0-rc.2`**（profile `desktop`）上完成。
