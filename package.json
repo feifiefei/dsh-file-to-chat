@@ -41,6 +41,9 @@
     "type": "git",
     "url": "git+https://gitee.com/mofeo/dsh-file-to-chat.git"
   },
+  "mirrors": {
+    "github": "https://github.com/feifiefei/dsh-file-to-chat"
+  },
   "bugs": {
     "url": "https://gitee.com/mofeo/dsh-file-to-chat/issues"
   },

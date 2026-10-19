@@ -57,26 +57,36 @@
 
 ### 方式一：从 Git 仓库装（推荐）
 
+桌面端（DeepSeek Harness 应用）的 profile 是 `desktop`：
+
 ```bash
-dsh plugin --profile <你的 profile> add https://gitee.com/mofeo/dsh-file-to-chat.git
+dsh plugin --profile desktop add https://gitee.com/mofeo/dsh-file-to-chat.git
 ```
 
-`<你的 profile>` 通常是 `desktop`（桌面端）或 `web`。装完在 **设置 → 插件** 里确认它是启用状态，然后**硬刷新一次浏览器**（`Ctrl+Shift+R`）。
+`dsh web` 起的 Web 端把 profile 换成 `web`：
+
+```bash
+dsh plugin --profile web add https://gitee.com/mofeo/dsh-file-to-chat.git
+```
+
+装完在 **设置 → 插件** 里确认它是启用状态，然后**硬刷新一次浏览器**（`Ctrl+Shift+R`）。
 
 ### 方式二：手动放进 profile
 
 ```bash
 git clone https://gitee.com/mofeo/dsh-file-to-chat.git
-# 把目录链接/复制到：~/.dsh/profiles/<profile>/node_modules/dsh-file-to-chat
+# 把目录链接/复制到：~/.dsh/profiles/desktop/node_modules/dsh-file-to-chat
 ```
 
-再把 `dsh-file-to-chat` 追加到 `~/.dsh/profiles/<profile>/package.json` 的 `dsh.profile.bundles` 数组里，重启应用。
+再把 `dsh-file-to-chat` 追加到 `~/.dsh/profiles/desktop/package.json` 的 `dsh.profile.bundles` 数组里，重启应用。Web 端把路径里的 `desktop` 换成 `web`。
 
 ### 卸载
 
 ```bash
-dsh plugin --profile <你的 profile> remove dsh-file-to-chat
+dsh plugin --profile desktop remove dsh-file-to-chat
 ```
+
+Web 端把 `desktop` 换成 `web`。
 
 > **注意**：有会话正在跑的时候卸载会被拒绝（`refused while agents are running`），先停掉再卸。
 
@@ -146,6 +156,25 @@ dsh-file-to-chat/
 ├── cordis.patch.yml     往 Loader 里插一行
 ├── lib/index.js         宿主半边（空实现，只为占位）
 └── client.js            浏览器半边 —— 全部功能
+```
+
+---
+
+## 仓库与镜像
+
+| 位置 | 角色 | 说明 |
+|---|---|---|
+| [gitee.com/mofeo/dsh-file-to-chat](https://gitee.com/mofeo/dsh-file-to-chat) | **开发主仓（权威）** | 提交先落这里；版本号、CHANGELOG 与发布版本以主仓为准 |
+| [github.com/feifiefei/dsh-file-to-chat](https://github.com/feifiefei/dsh-file-to-chat) | 镜像 | dsh-plugin.org 的收录页与安装命令指向它，**可能滞后于主仓**，仅供同步与市场发现 |
+
+`package.json` 的 `repository` / `bugs` 指向主仓（npm 的 `repository` 只接受单一仓库），GitHub 镜像另记在 `mirrors.github` 里 —— 这是本项目自定义的字段（和本项目的 `dsh` 字段一样），npm 不会解析它，只供人和脚本读取。
+
+### 从插件市场进来，怎么拿到最新版
+
+[dsh-plugin.org 收录页](https://dsh-plugin.org/zh/plugins/feifiefei/dsh-file-to-chat) 给的是 GitHub 源码安装命令；如果镜像还没同步到最新提交，改用主仓命令装（或把已有安装切到主仓）：
+
+```bash
+dsh plugin --profile desktop add https://gitee.com/mofeo/dsh-file-to-chat.git
 ```
 
 ---
