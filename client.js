@@ -1062,7 +1062,21 @@ window.__ModuleLoader__.load({
           // 一律经 G 读表：这样即使这段闭包属于上一个代码世代，也仍然取得到
           // 新世代写进去的正文。
           clipboardText: function (ref) { return G.refBodies.get(ref) || '' },
-          serialize: function (ref) { return Promise.resolve(G.refBodies.get(ref) || '') },
+          serialize: function (ref) {
+            var body = G.refBodies.get(ref) || ''
+            // 末尾补一个换行。用户在胶囊**后面**接着打的字（中间没有换行）会被
+            // 拼在序列化正文的最后一个字符后面 —— 引用块因此变成
+            // `> （未内联正文…），整理一个…`，用户那句话既在引用段里、又是正文。
+            // 折起来时它会跟着引用段一起被藏进胶囊（用户实测反馈：「折叠后会吞掉
+            // 我后边输入的内容」）。补一个换行，用户正文就回到自己的行上、
+            // 引用段到此为止。
+            //
+            // 例外：正文以「批注：」结尾时，批注内容正是要接在这一行后面的
+            // （胶囊右侧的普通草稿文本），补换行会把批注拆到下一行去。
+            if (body === '' || body.charAt(body.length - 1) === '\n') return Promise.resolve(body)
+            if (/批注：$/.test(body)) return Promise.resolve(body)
+            return Promise.resolve(body + '\n')
+          },
         },
         // 点输入框里的 chip：不接管跳转，返回 false 让它走默认行为。
         openReference: function () { return false },
@@ -2272,6 +2286,34 @@ window.__ModuleLoader__.load({
       var plain = []
 
       var isSource = function (line) { return /^\s*>\s*\uD83D\uDCC4\s*引用来源[：:]/.test(line) }
+      var bodyOf = function (run) {
+        return run.split('\n').map(function (l) { return l.replace(/^\s*>\s?/, '') }).join('\n').trim()
+      }
+
+      /**
+       * 从引用段里切出「我们发出去的那一块」，剩下的还给它当普通正文。
+       *
+       * 依据是 `G.refBodies` 里留着的原文：胶囊提交时，序列化正文就是它。
+       * 用户在胶囊后面接着打的字（中间没有换行）会黏在序列化正文的末行上，
+       * 于是整段都被判成引用段、被折进胶囊藏起来 —— 用户实测反馈
+       * 「折叠后会吞掉我后边输入的内容」。这一手把黏上去的尾巴剥出来。
+       *
+       * 只认「黏在同一行」的尾巴：残留原文后面紧跟换行时，那是**另一枚胶囊**
+       * （连着插两条引用），照旧整段当一块折，别把它拆成一地碎片。
+       * 老消息（补换行之前发出去的）因此也能救回来。
+       */
+      var gluedBlock = function (run) {
+        var best = ''
+        G.refBodies.forEach(function (b) {
+          if (typeof b !== 'string') return
+          if (b.length <= best.length) return
+          if (run.length <= b.length) return
+          if (run.charAt(b.length) === '\n') return
+          if (run.slice(0, b.length) !== b) return
+          best = b
+        })
+        return best
+      }
 
       var flushQuote = function () {
         if (buf.length === 0) return
@@ -2280,7 +2322,16 @@ window.__ModuleLoader__.load({
         // 引用（`> 别人说的话`）绝不能被折成胶囊 —— 那不是我们的东西，
         // 折了就是把用户自己写的正文藏起来。
         var ours = isSource(buf[0])
-        var body = buf.map(function (l) { return l.replace(/^\s*>\s?/, '') }).join('\n').trim()
+        if (ours) {
+          var block = gluedBlock(raw)
+          if (block !== '') {
+            parts.push({ quote: true, text: block, body: bodyOf(block) })
+            parts.push({ quote: false, text: raw.slice(block.length) })
+            buf = []
+            return
+          }
+        }
+        var body = bodyOf(raw)
         parts.push(ours && body !== '' ? { quote: true, text: raw, body: body } : { quote: false, text: raw })
         buf = []
       }
@@ -3137,6 +3188,12 @@ window.__ModuleLoader__.load({
             snap.table = got.table
             quote.appendChild(buildGrid(got.table))
           }
+        } else if (snap.pathOnly === true) {
+          // 「仅路径」**本来就不读文件** —— `snap.text` 是 null 属于它的正常形态，
+          // 不是失败。以前它落进下面那支，卡片于是把一次正常操作报成
+          // 「读不到纯文本（未知原因）」（用户实测反馈的截图）。
+          quote.className = 'f2c-quote'
+          quote.textContent = '只发送这个路径，不内联正文 —— 正文留给模型自己去读。'
         } else if (snap.kind === 'file' && (snap.text === null || snap.text === undefined)) {
           quote.className = 'f2c-quote'
           quote.textContent = snap.pending === true
