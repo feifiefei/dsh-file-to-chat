@@ -11,6 +11,9 @@
     "./client": "./client.js",
     "./package.json": "./package.json"
   },
+  "scripts": {
+    "test": "node test/fold.test.cjs"
+  },
   "files": [
     "lib",
     "client.js",
