@@ -3473,6 +3473,13 @@ window.__ModuleLoader__.load({
         // 真正的收膜时机是「刚到达的那一行已经露面」，见 holdNewRows / markSeen。
         if (CHIP_MARK_RE.test(draft)) sealOn()
 
+        // 文件树那座**不摆按钮**：那里只有一棵目录树，没有任何「可划选的内容」，
+        // 一枚点不动的「批注」纯属占地方（用户反馈：留着没用）。
+        // 但组件本身还得挂着 —— 它的另一份差事是把 inputActions / sessionId /
+        // draft 桥给命令式代码：从文件树右键发出的引用退化成纯文本时，要靠
+        // bridge.inputActions 写进草稿、靠 bridge.sessionId 认会话。
+        if (!isDocSeat) return null
+
         return React.createElement('span', {
           className: 'f2c-chip',
           title: '文本预览：划选文本，选区上方出现「批注」按钮。\n'

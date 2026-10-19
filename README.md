@@ -94,7 +94,7 @@ dsh plugin --profile <你的 profile> remove dsh-file-to-chat
 
 ## 已知限制
 
-- **只有右侧栏能触发。** 右侧栏未激活的标签页内容不挂载，所以预览没打开时工具栏上不会有入口。
+- **只有右侧栏能触发。** 右侧栏未激活的标签页内容不挂载，所以预览没打开时工具栏上不会有入口（文件树那个座位上只挂一个不渲染任何东西的桥接组件）。
 - **Word/PPT/PDF 没有行号**，只能定位到页码 —— 这类文件走的是「Office → PDF → PDF.js」渲染链，页内没有源码行这个概念。
 - **Excel 只取当前工作表**，且内联上限 200 行；`.xlsx` 公式取缓存值而非重算。
 - **读不到正文的文件不会假装成功**：`.docx`/`.xlsx` 靠浏览器解包抽取，抽不出来时卡片会明说原因，只发引用来源行，让模型自己去读文件。
@@ -109,7 +109,8 @@ dsh plugin --profile <你的 profile> remove dsh-file-to-chat
 
 用到的官方扩展点：
 
-- `sidebar.right.tab.files.actions` / `sidebar.right.tab.document.actions` —— 工具栏入口
+- `sidebar.right.tab.document.actions` —— 工具栏入口（「批注」提示按钮）
+- `sidebar.right.tab.files.actions` —— 不摆按钮，只借这个座位拿 `inputActions` / `sessionId` / `draft`
 - `inputTriggers.registerSource` —— 输入框胶囊的注册与提交时的序列化编解码
 - `conversation.input.for(scope)` → `insertReference(span, ref)` —— 把胶囊插进 Lexical 草稿
 - `remote.workspaceFiles.read` / `readBytes` —— 读工作区文件
