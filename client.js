@@ -1609,7 +1609,7 @@ window.__ModuleLoader__.load({
      * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
      * 体检卡片要靠它才能分清「用户装的是哪一版」。
      */
-    var F2C_VERSION = '1.0.5'
+    var F2C_VERSION = '1.0.6'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，
@@ -3051,24 +3051,33 @@ window.__ModuleLoader__.load({
       }
 
       if (rows.length === 0) return false
-      clearChildren(el)
-      for (var r = 0; r < rows.length; r++) {
-        var row = rows[r]
-        if (r > 0) el.appendChild(document.createElement('br'))
-        if (row.body !== undefined) {
-          el.appendChild(makeQuoteChip(el, row.body, total, row.seq))
+      // 先把新内容全部建在**离线片段**里，建完了才动真实 DOM。
+      // 旧写法是「先 clearChildren 再逐个 append」——中途任何一次异常都会让这一行
+      // 空着：内容还在宿主的数据里（复制按钮仍有字），画面上却是一片空白。
+      var frag = document.createDocumentFragment()
+      try {
+        for (var r = 0; r < rows.length; r++) {
+          var row = rows[r]
+          if (r > 0) frag.appendChild(document.createElement('br'))
+          if (row.body !== undefined) {
+            frag.appendChild(makeQuoteChip(el, row.body, total, row.seq))
+          }
+          if (row.note !== null && row.note !== undefined && row.note !== '') {
+            var noteEl = document.createElement('span')
+            noteEl.className = 'f2c-sent-note'
+            noteEl.setAttribute(FOLD_NOTE, '')
+            noteEl.textContent = ' ' + row.note
+            frag.appendChild(noteEl)
+          }
+          if (row.text !== undefined && row.text !== '') {
+            frag.appendChild(document.createTextNode(row.text))
+          }
         }
-        if (row.note !== null && row.note !== undefined && row.note !== '') {
-          var noteEl = document.createElement('span')
-          noteEl.className = 'f2c-sent-note'
-          noteEl.setAttribute(FOLD_NOTE, '')
-          noteEl.textContent = ' ' + row.note
-          el.appendChild(noteEl)
-        }
-        if (row.text !== undefined && row.text !== '') {
-          el.appendChild(document.createTextNode(row.text))
-        }
+      } catch (err) {
+        return false                    // 原文一个字不动，宁可这次不折
       }
+      clearChildren(el)
+      el.appendChild(frag)
       el.setAttribute(FOLD_DONE, hashText(raw))
       return true
     }
@@ -3105,6 +3114,16 @@ window.__ModuleLoader__.load({
           //    文字，按老条件它就一直不揭膜，于是那条消息**一直是空的**（2026-10-21
           //    用户实测）。有可绘制的东西就揭。
           if (hasPaintableContent(row)) markSeen(row)
+          // ⓪b 自愈：这一行我们折过（带 done 标记），画面上却**一个字都没有** ——
+          //    说明上一次折叠把内容清空了却没补回来（旧实现的异常路径，用户实测
+          //    「发出去一片空白，复制按钮却有字」）。原文还在 __f2cRaw 里，直接
+          //    摊开，总比让人对着空白、还得点复制才知道自己发过什么强。
+          if (row.getAttribute(FOLD_DONE) !== null && row.getAttribute(FOLD_DONE) !== 'open'
+            && (row.textContent || '') === '' && typeof row.__f2cRaw === 'string' && row.__f2cRaw !== '') {
+            renderPlain(row, row.__f2cRaw)
+            FOLDED_ROWS.delete(row)
+            continue
+          }
           // ① 折过、且 chip 仍在 → 跳过。省掉下面 textContent 这种要拷贝整段
           //    文本的操作 —— 流式回答期间这个函数每帧都可能被叫醒。
           if (FOLDED_ROWS.has(row) && row.querySelector('[' + FOLD_CHIP + ']') !== null) {
@@ -3692,6 +3711,39 @@ window.__ModuleLoader__.load({
         return rows
       }
 
+      /**
+       * 诊断用：把**最后一条用户消息行**的现场抄下来。
+       *
+       * 「消息发出去一片空白、但复制按钮还能复制出原文」这种故障，光看代码是判不
+       * 出来的 —— 内容在宿主的模型里、只是 DOM 没画出来。那就把 DOM 抄出来：
+       * 行内联可见性、我们打的那几个标记、文本长度、img 数量、前 900 字的 HTML。
+       */
+      function lastRowDiagnosis() {
+        var out = []
+        try {
+          out.push('封膜=' + (document.body !== null && document.body.getAttribute(SEAL_ATTR) !== null ? '开' : '关'))
+          var nodes = document.querySelectorAll('[data-chat-flow-kind="user"], [data-submission-echo]')
+          if (nodes.length === 0) { out.push('（没找到用户消息行）'); return out.join('\n') }
+          var row = nodes[nodes.length - 1]
+          var cs = null
+          try { cs = window.getComputedStyle(row) } catch (err) { cs = null }
+          out.push('[最近一条用户消息]')
+          out.push('inline visibility=' + (row.style === undefined || row.style.visibility === '' ? '(空)' : row.style.visibility)
+            + ' computed=' + (cs === null ? '?' : cs.visibility) + '/' + (cs === null ? '?' : cs.display))
+          out.push('seen=' + (row.getAttribute('data-f2c-seen') !== null)
+            + ' held=' + (row.getAttribute(HOLD_ATTR) !== null)
+            + ' done=' + (row.getAttribute(FOLD_DONE) === null ? '-' : row.getAttribute(FOLD_DONE)))
+          out.push('文本长度=' + ((row.textContent || '').length)
+            + ' 直接子元素=' + row.children.length
+            + ' img=' + row.querySelectorAll('img').length
+            + ' 胶囊=' + row.querySelectorAll('[' + FOLD_CHIP + ']').length)
+          out.push('HTML: ' + String(row.outerHTML).replace(/\s+/g, ' ').slice(0, 900))
+        } catch (err) {
+          out.push('（读取失败：' + err + '）')
+        }
+        return out.join('\n')
+      }
+
       function healthDigest() {
         var caps = healthCapRows()
         var ancs = healthAnchorRows()
@@ -3704,6 +3756,7 @@ window.__ModuleLoader__.load({
         }
         out.push('', '[DOM 锚点]')
         for (i = 0; i < ancs.length; i++) out.push((ancs[i].ok ? 'OK  ' : 'MISS') + ' ' + ancs[i].name)
+        out.push('', lastRowDiagnosis())
         var bad = 0
         for (i = 0; i < caps.length; i++) if (!caps[i].ok) bad++
         for (i = 0; i < ancs.length; i++) if (!ancs[i].ok) bad++
