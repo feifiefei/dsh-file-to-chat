@@ -1609,7 +1609,7 @@ window.__ModuleLoader__.load({
      * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
      * 体检卡片要靠它才能分清「用户装的是哪一版」。
      */
-    var F2C_VERSION = '1.0.8'
+    var F2C_VERSION = '1.0.9'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，
@@ -2484,8 +2484,10 @@ window.__ModuleLoader__.load({
      * 折叠的现场：这一轮扫了几行、卡在哪一步、折成几处、出过什么错。
      * 体检卡片把它抄出去 —— 「为什么这条消息没折成胶囊」光看截图判不出来。
      */
-    var FOLD_STAT = { rows: 0, noQuote: 0, noNl: 0, noTarget: 0, folded: 0, err: 0 }
+    var FOLD_STAT = { rows: 0, noQuote: 0, noNl: 0, noTarget: 0, calls: 0, falsy: 0, folded: 0, err: 0 }
     var FOLD_ERRS = []
+    /** 每一行为什么没折：只给体检卡片看，正常人不会去读。 */
+    var ROW_WHY = new WeakMap()
 
     function noteFoldError(err) {
       var s = String(err === null || err === undefined ? err : (err.message === undefined ? err : err.message))
@@ -3089,6 +3091,7 @@ window.__ModuleLoader__.load({
           }
         }
       } catch (err) {
+        noteFoldError('renderFold 抛错：' + (err !== null && err !== undefined && err.message !== undefined ? err.message : err))
         return false                    // 原文一个字不动，宁可这次不折
       }
       clearChildren(el)
@@ -3166,7 +3169,11 @@ window.__ModuleLoader__.load({
           }
           // ② 行级粗筛：整条气泡里一个 `> ` 行都没有就直接走人
           var rowText = textOfRow(row)
-          if (!/^\s*>\s?/m.test(rowText)) { FOLD_STAT.noQuote++; continue }
+          if (!/^\s*>\s?/m.test(rowText)) {
+            FOLD_STAT.noQuote++
+            ROW_WHY.set(row, 'noquote text=' + JSON.stringify(String(rowText).slice(0, 40)))
+            continue
+          }
           // ②b 换行保护（防「整条消息被折进一枚胶囊」的静默数据丢失）。
           //
           // 本插件发出的引用块**至少两行**：`> 📄 引用来源：…` 加上至少一行正文
@@ -3182,7 +3189,11 @@ window.__ModuleLoader__.load({
           // 整条消息变成一行，而「该行以 `> 📄 引用来源` 开头」依然成立：我们就会把
           // **用户整条消息**折进一枚胶囊、正文被藏起来。宁可退回「不折、显示全文」，
           // 也绝不吞掉内容。
-          if (rowText.indexOf('\n') < 0) { FOLD_STAT.noNl++; continue }
+          if (rowText.indexOf('\n') < 0) {
+            FOLD_STAT.noNl++
+            ROW_WHY.set(row, 'nonl text=' + JSON.stringify(String(rowText).slice(0, 40)))
+            continue
+          }
 
           // ③ 找「自身含引用行、但子元素都不含」的最深容器
           var targets = []
@@ -3199,17 +3210,32 @@ window.__ModuleLoader__.load({
             if (childHit) continue
             targets.push(el)
           }
-          if (targets.length === 0) { FOLD_STAT.noTarget++; continue }
+          if (targets.length === 0) {
+            FOLD_STAT.noTarget++
+            ROW_WHY.set(row, 'notarget 元素=' + row.querySelectorAll('*').length)
+            continue
+          }
 
           var did = 0
           for (var n = 0; n < targets.length; n++) {
             var host = targets[n]
             // 用户手动展开过就别折回去（React 重渲染会清掉这个标记，那时重折是对的）
-            if (host.getAttribute(FOLD_DONE) === 'open') continue
+            if (host.getAttribute(FOLD_DONE) === 'open') {
+              ROW_WHY.set(row, 'open 手动展开过')
+              continue
+            }
             var raw = textOfRow(host)
-            if (raw === null || !/^\s*>\s?/m.test(raw)) continue
+            if (raw === null || !/^\s*>\s?/m.test(raw)) {
+              ROW_WHY.set(row, 'raw 不含引用行 ' + JSON.stringify(String(raw).slice(0, 40)))
+              continue
+            }
             host.__f2cRaw = raw
+            FOLD_STAT.calls++
             if (renderFold(host, raw)) did++
+            else {
+              FOLD_STAT.falsy++
+              ROW_WHY.set(row, 'renderFold=false raw=' + JSON.stringify(String(raw).slice(0, 40)))
+            }
           }
           if (did > 0) FOLDED_ROWS.add(row)
           folded += did
@@ -3814,14 +3840,28 @@ window.__ModuleLoader__.load({
             out.push('  #' + (q + 1) + ' 字=' + (r2.textContent || '').length
               + ' img=' + ii.length + '(坏 ' + bb + ')'
               + ' done=' + (r2.getAttribute(FOLD_DONE) === null ? '-' : r2.getAttribute(FOLD_DONE))
+              + ' 为何=' + (ROW_WHY.has(r2) ? String(ROW_WHY.get(r2)) : '（没扫到过）')
+              + ' 命中=' + (r2.matches !== undefined && r2.matches(FOLD_SEL) ? 'Y' : 'N')
               + ' 首行=' + JSON.stringify(t2.split('\n')[0].slice(0, 40)))
           }
         } catch (err) {
           out.push('（最近消息统计失败：' + err + '）')
         }
+        // 每一行的 HTML 骨架：想分清「这条消息是只有附件」还是「正文被抹掉了」，
+        // 只看字数不够 —— 得看里面到底有没有装正文的容器。
+        try {
+          var all2 = document.querySelectorAll('[data-chat-flow-kind="user"]')
+          out.push('[最近三条 HTML]')
+          for (var h = Math.max(0, all2.length - 3); h < all2.length; h++) {
+            out.push('  #' + (h + 1) + ' ' + String(all2[h].outerHTML).replace(/\s+/g, ' ').slice(0, 260))
+          }
+        } catch (err) {
+          out.push('（HTML 统计失败：' + err + '）')
+        }
         out.push('', '[折叠] 扫描=' + FOLD_STAT.rows + ' 无引用行=' + FOLD_STAT.noQuote
           + ' 无换行=' + FOLD_STAT.noNl + ' 无容器=' + FOLD_STAT.noTarget
-          + ' 折成=' + FOLD_STAT.folded + ' 出错=' + FOLD_STAT.err)
+          + ' 调用=' + FOLD_STAT.calls + ' 折成=' + FOLD_STAT.folded
+          + ' 假=' + FOLD_STAT.falsy + ' 出错=' + FOLD_STAT.err)
         if (FOLD_ERRS.length > 0) {
           out.push('[折叠错误]')
           for (var e = 0; e < FOLD_ERRS.length; e++) out.push('  ' + FOLD_ERRS[e])
