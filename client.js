@@ -266,6 +266,125 @@ window.__ModuleLoader__.load({
       } catch (_) { return null }
     }
 
+    // ---- 「这段在哪」——
+    // 模型拿到 40 行代码，不知道自己在哪个函数里；拿到一段 Markdown，不知道属于
+    // 哪一节。引用块里补一行 `> 位置：…`，比让模型多问一轮便宜得多。
+    //
+    // 数据全部来自预览**已经渲染出来的 DOM**：不读文件、不发请求、不猜。
+    //   · Markdown 渲染成真 H1~H6 → 往回收集标题，拼成 `# 需求 › ## 表结构`
+    //   · 纯文本/代码预览每行一个节点 → 往回找最近的函数/类声明
+    // 找不到就不写这一行 —— 宁缺毋滥。
+    var SYMBOL_PATTERNS = [
+      ['function', /^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)/],
+      ['class', /^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/],
+      ['def', /^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)/],
+      ['func', /^\s*(?:pub\s+)?func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)/],
+      ['fn', /^\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_]\w*)/],
+      ['function', /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/],
+      ['method', /^\s*(?:public|private|protected|static|async|override|get|set|\s)*([A-Za-z_$][\w$]*)\s*\([^;]*\)\s*\{\s*$/],
+    ]
+    var NOT_A_NAME = /^(?:if|for|while|switch|catch|return|else|do|try|with|function|new|typeof|await|then)$/
+
+    /** 一行是不是某个命名块的头：返回 { kind, name } 或 null。 */
+    function symbolOfLine(text) {
+      var s = String(text === null || text === undefined ? '' : text)
+      if (s.length > 400) return null
+      for (var i = 0; i < SYMBOL_PATTERNS.length; i++) {
+        var m = SYMBOL_PATTERNS[i][1].exec(s)
+        if (m === null) continue
+        if (NOT_A_NAME.test(m[1])) continue
+        return { kind: SYMBOL_PATTERNS[i][0], name: m[1] }
+      }
+      return null
+    }
+
+    /** Markdown 预览里，选区所在的标题路径（`# 需求 › ## 表结构`），取不到返回 null。 */
+    function headingPathOf(node) {
+      try {
+        var el = nodeToElement(node)
+        if (el === null || !el.closest) return null
+        var host = el.closest('[data-document-markdown]')
+        if (host === null) return null
+        var heads = host.querySelectorAll('h1,h2,h3,h4,h5,h6')
+        var path = []
+        for (var i = 0; i < heads.length; i++) {
+          var h = heads[i]
+          var isTarget = h === el || h.contains(el)
+          // 4 = DOCUMENT_POSITION_FOLLOWING：el 在 h 之后才算「前面的标题」。
+          // 命中标题本身时也要把自己算进去（选中的就是那一行标题）。
+          if (!isTarget && (h.compareDocumentPosition(el) & 4) !== 4) break
+          var lv = Number(String(h.tagName).charAt(1))
+          if (!isFinite(lv) || lv < 1) continue
+          while (path.length > 0 && path[path.length - 1].lv >= lv) path.pop()
+          var title = String(h.textContent === null || h.textContent === undefined ? '' : h.textContent).trim()
+          if (title !== '') {
+            if (title.length > 60) title = title.slice(0, 60) + '…'
+            path.push({ lv: lv, text: title })
+          }
+          if (isTarget) break
+        }
+        if (path.length === 0) return null
+        var parts = []
+        for (var j = 0; j < path.length; j++) {
+          parts.push(new Array(path[j].lv + 1).join('#') + ' ' + path[j].text)
+        }
+        return parts.join(' › ')
+      } catch (_) { return null }
+    }
+
+    /** 纯文本/代码预览里，选区上方的最近一个函数/类声明。 */
+    function enclosingSymbolOf(node) {
+      try {
+        var el = nodeToElement(node)
+        if (el === null || !el.closest) return null
+        var plain = el.closest('[data-textpreview-plain]')
+        var host = plain !== null
+          ? plain
+          : (el.closest('[data-code-block-content]') || el.closest('[data-code-preview]'))
+        if (host === null || !host.querySelectorAll) return null
+        var isPlain = plain !== null
+        var rows = host.querySelectorAll(isPlain ? '[data-textpreview-line]' : '.line')
+        if (rows === null || rows.length === 0) return null
+
+        // 从选区那一行往回找，最多看 400 行 —— 再远就不是「所在的块」了，
+        // 而且大文件（打包产物）里一路回溯会白烧 CPU。
+        var at = -1
+        if (isPlain) {
+          var my = lineNumberOf(el)
+          if (my === null) return null
+          for (var i = rows.length - 1; i >= 0; i--) {
+            if (Number(rows[i].getAttribute('data-textpreview-line')) === my) { at = i; break }
+          }
+        } else {
+          var lineEl = el.closest('.line')
+          at = lineEl === null ? -1 : Array.prototype.indexOf.call(rows, lineEl)
+        }
+        if (at < 0) return null
+
+        var floor = Math.max(0, at - 400)
+        // 从选区**那一行**开始往回找：选中的第一行如果本身就是函数声明
+        // （从抬头的 function 那一行开始拖），那它就是答案，不能跳过。
+        for (var k = at; k >= floor; k--) {
+          var text = String(rows[k].textContent === null || rows[k].textContent === undefined ? '' : rows[k].textContent)
+          var sym = symbolOfLine(text)
+          if (sym === null) continue
+          var no = isPlain
+            ? Number(rows[k].getAttribute('data-textpreview-line'))
+            : k + 1
+          return sym.kind + ' ' + sym.name + (sym.kind === 'class' ? '' : '()') +
+            (isFinite(no) && no >= 1 ? '，第 ' + no + ' 行起' : '')
+        }
+        return null
+      } catch (_) { return null }
+    }
+
+    /** 给引用块用的定位上下文：一行短描述，取不到返回 null。 */
+    function spotOf(node) {
+      var head = headingPathOf(node)
+      if (head !== null) return head
+      return enclosingSymbolOf(node)
+    }
+
     // ================================================================
     // 三、选区快照
     // ================================================================
@@ -329,6 +448,7 @@ window.__ModuleLoader__.load({
         path: fb !== '' ? fb : (fromPreview !== null && fromPreview !== '' ? fromPreview : null),
         lineRange: lineRangeOf(range),
         pageRange: pageRangeOf(range),
+        spot: spotOf(range.startContainer),
         top: first.top,
         bottom: last.bottom,
         left: Math.min(first.left, last.left),
@@ -653,6 +773,28 @@ window.__ModuleLoader__.load({
       return ''
     }
 
+    /**
+     * 选区**上方**那一行是不是表头。是就返回它的单元格数组，不是返回 null。
+     *
+     * 判据只有一条：至少有 2 个非空格（单列选区放宽到 1 个）。大标题通常只在
+     * A 列有字（合并单元格），真表头横跨整片列 —— 这条能分开两者。
+     * 宁可多带一行并**在引用块里写明**「表头取自第 N 行」，也不要漏掉列名：
+     * 漏了，`composeTableBlock` 会把第一个数据行当 Markdown 表头，模型拿到的
+     * 列名就是错的（选 B3:F20、表头在第 2 行时，列名会变成 2024-12-31 这类）。
+     */
+    function headerRowOf(map, sheetIndex, rg, cols) {
+      if (rg.r1 <= 0) return null
+      var cells = []
+      var filled = 0
+      for (var c = 0; c < cols; c++) {
+        var v = cellTextOf(map[sheetIndex + '|' + (rg.r1 - 1) + ':' + (rg.c1 + c)])
+        if (String(v).trim() !== '') filled++
+        cells.push(v)
+      }
+      if (filled < (cols === 1 ? 1 : 2)) return null
+      return cells
+    }
+
     /** 活动工作表的下标。Luckysheet / FortuneSheet 用 status === 1 标记当前表。 */
     function activeSheetIndex(workbook) {
       if (!Array.isArray(workbook)) return 0
@@ -708,7 +850,12 @@ window.__ModuleLoader__.load({
         }
         table.push(line)
       }
-      return { table: table, sheet: sheetNameAt(workbook, sheetIndex) }
+      return {
+        table: table,
+        sheet: sheetNameAt(workbook, sheetIndex),
+        header: headerRowOf(map, sheetIndex, rg, cols),
+        headerRow: rg.r1 - 1,
+      }
     }
 
     // ================================================================
@@ -894,6 +1041,79 @@ window.__ModuleLoader__.load({
       '.f2c-grid th { position: sticky; top: 0; background: ' + tok('layer2') + ';',
       '  color: ' + tok('label') + '; font-weight: 500; }',
       '.f2c-empty { color: ' + tok('label3') + '; font-style: italic; }',
+      // 表头开关：贴在预览表格底下的一条，别抢表格的注意力
+      '.f2c-head { display: flex; align-items: center; gap: 6px;',
+      '  padding: 4px 8px; border-top: 0.5px solid ' + tok('border2') + ';',
+      '  color: ' + tok('label3') + '; font-size: 11px; line-height: 16px;',
+      '  cursor: pointer; user-select: none; }',
+      '.f2c-head input { margin: 0; accent-color: ' + tok('brand') + '; }',
+      // 体检卡片：每行一项，✓/✕ 在左，功能名在右
+      '.f2c-card.is-health { width: 380px; }',
+      '.f2c-health { max-height: 46vh; overflow: auto; margin: 0 4px 4px; padding: 3px 8px 6px;',
+      '  border: 0.5px solid ' + tok('border4') + ';',
+      '  border-radius: ' + tok('radiusMd') + ';',
+      '  background: ' + tok('layer1') + '; }',
+      '.f2c-health-sec { margin: 7px 0 2px; color: ' + tok('label3') + ';',
+      '  font-size: 11px; line-height: 16px; }',
+      '.f2c-health-row { display: flex; align-items: baseline; gap: 6px;',
+      '  padding: 1px 0; color: ' + tok('label2') + ';',
+      '  font-size: 12px; line-height: 18px; }',
+      '.f2c-health-dot { flex: none; width: 10px; text-align: center;',
+      '  font-size: 11px; line-height: 18px; }',
+      '.f2c-health-row.is-ok .f2c-health-dot { color: ' + tok('brand') + '; }',
+      '.f2c-health-row.is-bad .f2c-health-dot { color: ' + tok('label') + '; }',
+      '.f2c-health-row.is-bad .f2c-health-name { color: ' + tok('label') + '; font-weight: 500; }',
+      '.f2c-health-name { flex: none; }',
+      '.f2c-health-use { flex: 1; color: ' + tok('label3') + ';',
+      '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+      '.f2c-health-verdict { margin: 8px 0 2px; padding-top: 6px;',
+      '  border-top: 0.5px solid ' + tok('border2') + ';',
+      '  font-size: 12px; line-height: 18px; }',
+      '.f2c-health-verdict.is-ok { color: ' + tok('label3') + '; }',
+      '.f2c-health-verdict.is-bad { color: ' + tok('label') + '; font-weight: 500; }',
+      // 体检卡片底栏里的两个小按钮：形状照菜单项，但不吃满整行
+      // 引用篮：常驻小胶囊 + 打开后的清单卡片
+      '.f2c-basket-pill { position: fixed; right: 16px; bottom: 92px; z-index: ' + Z_MENU + ';',
+      '  pointer-events: auto; height: 26px; padding: 0 10px; border: 0;',
+      '  border-radius: 13px; cursor: pointer; font-family: inherit;',
+      '  font-size: 12px; line-height: 26px; color: ' + tok('label') + ';',
+      '  box-shadow: 0 2px 10px rgba(0,0,0,.18);',
+      SURFACE,
+      '}',
+      '.f2c-basket-pill:hover { background-image: ' + hoverFill() + '; }',
+      '.f2c-card.is-basket { width: 380px; }',
+      '.f2c-basket-body { max-height: 42vh; overflow: auto; margin: 0 4px 4px; padding: 2px 4px;',
+      '  border: 0.5px solid ' + tok('border4') + ';',
+      '  border-radius: ' + tok('radiusMd') + ';',
+      '  background: ' + tok('layer1') + '; }',
+      '.f2c-basket-row { display: flex; align-items: center; gap: 4px;',
+      '  padding: 2px 4px; border-radius: ' + tok('radiusSm') + '; }',
+      '.f2c-basket-row:hover { background-image: ' + hoverFill() + '; }',
+      '.f2c-basket-name { flex: 1; overflow: hidden; text-overflow: ellipsis;',
+      '  white-space: nowrap; color: ' + tok('label2') + ';',
+      '  font-size: 12px; line-height: 20px; }',
+      '.f2c-basket-act { flex: none; width: 20px; height: 20px; padding: 0; border: 0;',
+      '  border-radius: ' + tok('radiusSm') + '; background: transparent;',
+      '  color: ' + tok('label3') + '; font-family: inherit; font-size: 11px;',
+      '  line-height: 20px; cursor: pointer; }',
+      '.f2c-basket-act:hover { background-image: ' + hoverFill() + '; color: ' + tok('label') + '; }',
+      '.f2c-basket-act:disabled { opacity: .35; cursor: default; }',
+      // 卡片底栏里的「加入引用篮」：比主按钮轻一档
+      '.f2c-hold { flex: none; height: 28px; padding: 0 8px; border: 0;',
+      '  border-radius: ' + tok('radiusSm') + '; background: transparent;',
+      '  color: ' + tok('label2') + '; font-family: inherit; font-size: 12px;',
+      '  line-height: 28px; cursor: pointer; }',
+      '.f2c-hold:hover { background-image: ' + hoverFill() + '; color: ' + tok('label') + '; }',
+      '.f2c-card-foot .f2c-menu-btn { flex: none; height: 24px; padding: 0 8px;',
+      '  border: 0; border-radius: ' + tok('radiusSm') + '; background: transparent;',
+      '  color: ' + tok('label2') + '; font-family: inherit; font-size: 12px;',
+      '  line-height: 24px; cursor: pointer; }',
+      '.f2c-card-foot .f2c-menu-btn:hover { background-image: ' + hoverFill() + ';',
+      '  color: ' + tok('label') + '; }',
+      '.f2c-card-foot { display: flex; align-items: center; gap: 6px;',
+      '  margin-top: 3px; padding: 5px 6px 1px;',
+      '  border-top: 0.5px solid ' + tok('border2') + '; }',
+      '.f2c-card-foot .f2c-menu-btn + .f2c-menu-btn { margin-left: auto; }',
       '.f2c-note2 { margin: 0 8px 4px; color: ' + tok('label3') + ';',
       '  font-size: 12px; line-height: 18px; }',
 
@@ -923,6 +1143,17 @@ window.__ModuleLoader__.load({
       '  user-select: none; }',
       '.f2c-sent:hover { border-color: ' + tok('border4') + '; color: ' + tok('label') + '; }',
       '.f2c-sent:focus-visible { outline: 2px solid ' + tok('brand') + '; outline-offset: 1px; }',
+
+      // 可跳回源码的胶囊：右侧常留 18px，悬停时在那儿浮出 ↗。
+      // 留白是常驻的（不是 hover 才加）—— 否则鼠标一过胶囊就变宽、正文跟着重排。
+      '.f2c-sent.is-jump { position: relative; padding-right: 20px; }',
+      '.f2c-sent .f2c-jump { position: absolute; right: 3px; top: 50%;',
+      '  transform: translateY(-50%); width: 14px; height: 14px; display: none;',
+      '  align-items: center; justify-content: center; border-radius: 3px;',
+      '  background: ' + tok('layer1') + '; color: ' + tok('label2') + ';',
+      '  font-size: 10px; line-height: 1; cursor: pointer; }',
+      '.f2c-sent.is-jump:hover .f2c-jump { display: inline-flex; }',
+      '.f2c-sent .f2c-jump:hover { background: ' + hoverFill() + '; color: ' + tok('brand') + '; }',
 
       // 折叠后**必须留着**的批注。刻意做成 inline 的裸文字，不加方框 ——
       // 目标是和输入框里「胶囊后面直接跟批注」的观感一致；加框会让聊天
@@ -1190,6 +1421,8 @@ window.__ModuleLoader__.load({
     function injectText(ctx, readSessionId, text, label, note) {
       var sid = bridge.sessionId
       if (sid === undefined || sid === null || sid === '') sid = readSessionId()
+      // 记下来：聊天里胶囊的「打开并定位」要用它拼 dsh-resource:// 地址。
+      if (sid !== undefined && sid !== null && sid !== '') G.sessionId = sid
       var noteBody = note === null || note === undefined ? '' : String(note).trim()
       // 纯文本路径（②③）没法把批注和引用拆开显示，直接把两者拼成完整正文。
       var full = noteBody === '' ? text : text + '\n\n批注：' + noteBody
@@ -1371,6 +1604,13 @@ window.__ModuleLoader__.load({
         return false
       }
     }
+
+    /**
+     * 插件自己的版本号。**必须与 package.json 的 version 一致** ——
+     * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
+     * 体检卡片要靠它才能分清「用户装的是哪一版」。
+     */
+    var F2C_VERSION = '1.0.3'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，
@@ -1774,7 +2014,36 @@ window.__ModuleLoader__.load({
      * 读不动不是异常路径 —— docx/xlsx/pdf 这类会被 `workspace-file/not-text` 拒掉，
      * 那就 `done(null, 原因)`，由 composeTextBlock 只发来源行，让模型自己去读。
      */
-    function readFileForChat(ctx, sessionId, path, done) {
+    // ================================================================
+    // 六·C、大文件续发：每个文件记住「下次从第几行接着发」
+    // ================================================================
+    // 200 行够用的时候谁也不在意；真遇到几千行的日志，用户只能反复右键、手动
+    // 截取。游标存在 G 上（HMR 世代之间共享），只在**真的发出去**之后推进 ——
+    // 打开卡片看了却不发，不该推进。
+    function cursorOf(path) {
+      if (G.cursor === undefined || G.cursor === null) G.cursor = new Map()
+      var next = G.cursor.get(path)
+      return typeof next === 'number' && isFinite(next) && next >= 2 ? next : null
+    }
+
+    function rememberCursor(path, meta) {
+      if (G.cursor === undefined || G.cursor === null) G.cursor = new Map()
+      if (meta === null || meta === undefined || meta.eof === false) {
+        // 还有剩的：下次从 endLine + 1 开始
+        if (meta !== null && meta !== undefined && typeof meta.endLine === 'number' && meta.endLine >= 1) {
+          G.cursor.set(path, meta.endLine + 1)
+        }
+        return
+      }
+      G.cursor.delete(path)
+    }
+
+    function readFileForChat(ctx, sessionId, path, done, fromLine) {
+      // 从第几行开始取（1-based）。续发时由「发送剩余部分」传进来。
+      var start = 1
+      if (typeof fromLine === 'number' && isFinite(fromLine) && fromLine > 1) {
+        start = Math.floor(fromLine)
+      }
       // 两条路（文本 / 字节抽包）可能都会回落，done 只允许生效一次。
       var settled = false
       function finish(text, failure, meta) {
@@ -1860,12 +2129,18 @@ window.__ModuleLoader__.load({
             var text = decodeUtf8(cut)
             if (text === '') { finish(null, why, null); return }
             var all = text.split('\n')
-            var truncated = bytes.length > FILE_MAX_BYTES || all.length > FILE_READ_LINES
-            if (all.length > FILE_READ_LINES) text = all.slice(0, FILE_READ_LINES).join('\n')
-            if (truncated) {
-              text += '\n…（文件还有更多内容，此处只引用前 ' + FILE_READ_LINES + ' 行）'
-            }
-            finish(text, null, { lines: all.length, bytes: bytes.length, eof: !truncated, from: 'bytes' })
+            var from = Math.min(start, Math.max(1, all.length))
+            var slice = all.slice(from - 1, from - 1 + FILE_READ_LINES)
+            var to = from - 1 + slice.length
+            var truncated = bytes.length > FILE_MAX_BYTES || to < all.length
+            // 截断提示**不塞进正文**：正文会被当成引用内容原样发给模型，
+            // 里面掺一句我们自己写的话，模型会以为文件里真有这行。
+            // 提示由 composeTextBlock 按 meta 生成。
+            finish(slice.join('\n'), null, {
+              lines: all.length, startLine: from, endLine: to,
+              eof: !truncated, bytes: bytes.length, from: 'bytes',
+              truncatedByBytes: bytes.length > FILE_MAX_BYTES,
+            })
             return
           }
 
@@ -1886,7 +2161,12 @@ window.__ModuleLoader__.load({
         // 挡掉（`limit must be at most <maxLines>`），而那个错误在实机上表现
         // 成「成功但正文为空」。用宿主自己的默认页大小最稳，行数截断我们在
         // 客户端自己再做一次。
-        pending = api.read(sessionId, path, {})
+        // 续发时把起始行交给宿主：`read` 的 `range.offset` 是 1 起算的首行。
+        // **不传 `limit`** —— 默认就是 maxLines（5000），传大了反而被
+        // 「limit must be at most maxLines」挡成 bad-request。
+        pending = start > 1
+          ? api.read(sessionId, path, { offset: start })
+          : api.read(sessionId, path, {})
       } catch (err) {
         viaBytes(fileFailureLabel(err))
         return
@@ -1907,20 +2187,35 @@ window.__ModuleLoader__.load({
           from: 'text'
         }
         if (text === '') {
+          // 续发时请求的行号越过了文件末尾 —— 这不是「读不到」，是「没有更多了」。
+          if (start > 1) {
+            finish(null, '这个文件没有第 ' + start + ' 行（从那里起已经没有内容了）', {
+              startLine: start, endLine: start - 1, lines: start - 1, eof: true, bytes: meta.bytes, from: 'text',
+            })
+            return
+          }
           // 宿主说成功、正文却空 —— 切到字节路，并把原始返回留给 DEBUG。
           dbg('workspaceFiles.read 返回了空正文，原始返回：', raw)
           viaBytes('read 返回 ' + describeValue(raw) + '，没有可用的 text')
           return
         }
         // 行数截断一律在客户端做，不管宿主的页大小是多少。
+        // `page.lines` 是**本页**的行数（API 明确说「不报告总行数」），所以
+        // 起始行只认 `page.offset`；总行数只有在 eof 时才能反推出来。
+        var pageOffset = page !== null && page !== undefined
+          && typeof page.offset === 'number' && page.offset >= 1 ? page.offset : start
         var allLines = text.split('\n')
-        if (allLines.length > FILE_READ_LINES) {
-          text = allLines.slice(0, FILE_READ_LINES).join('\n') + '\n'
-        }
-        if (meta.eof === false || allLines.length > FILE_READ_LINES) {
-          text += '…（文件还有更多内容，此处只引用前 ' + FILE_READ_LINES + ' 行）'
-        }
-        finish(text, null, meta)
+        var sliceLines = allLines.slice(0, FILE_READ_LINES)
+        var endLine = pageOffset + sliceLines.length - 1
+        var lastPage = page === null || page === undefined ? false : page.eof === true
+        var more = !lastPage || sliceLines.length < allLines.length
+        finish(sliceLines.join('\n'), null, {
+          startLine: pageOffset,
+          endLine: endLine,
+          // 只有读到文件尾时才敢说「共 N 行」。
+          lines: more ? null : endLine,
+          eof: !more, bytes: meta.bytes, from: 'text',
+        })
       }, function (err) { viaBytes(fileFailureLabel(err)) })
     }
 
@@ -1987,6 +2282,22 @@ window.__ModuleLoader__.load({
       return out.join('\n')
     }
 
+    /** 文件引用在来源行里的范围描述：整份 / 第 a-b 行（共 N 行）。 */
+    function fileRangeLabel(snap) {
+      var meta = snap.meta
+      var label = typeof snap.label === 'string' && snap.label !== '' ? snap.label : '整份文件'
+      if (meta === null || meta === undefined) return label
+      var total = typeof meta.lines === 'number' ? meta.lines : null
+      var a = typeof meta.startLine === 'number' ? meta.startLine : null
+      var b = typeof meta.endLine === 'number' ? meta.endLine : null
+      if (a === null || b === null) return label
+      // 没读到文件尾就不知道总行数（宿主不报），别编一个出来。
+      if (total === null) return a <= 1 ? '第 1-' + b + ' 行' : '第 ' + a + '-' + b + ' 行'
+      if (a <= 1 && b >= total) return '整份文件，共 ' + total + ' 行'
+      if (a <= 1) return '第 1-' + b + ' 行（共 ' + total + ' 行）'
+      return '第 ' + a + '-' + b + ' 行（共 ' + total + ' 行）'
+    }
+
     function composeTextBlock(snap) {
       var where = snap.path !== null && snap.path !== undefined && snap.path !== ''
         ? snap.path : '（未识别来源文件）'
@@ -2000,10 +2311,15 @@ window.__ModuleLoader__.load({
           ? '（第 ' + snap.pageRange[0] + ' 页）'
           : '（第 ' + snap.pageRange[0] + '-' + snap.pageRange[1] + ' 页）'
       } else if (snap.kind === 'file') {
-        where += '（' + (typeof snap.label === 'string' && snap.label !== '' ? snap.label : '整份文件') + '）'
+        where += '（' + fileRangeLabel(snap) + '）'
       }
 
       var out = ['> \uD83D\uDCC4 引用来源：' + where]
+
+      // 定位上下文：Markdown 的标题路径，或者代码所在的函数/类。模型拿到 40 行
+      // 裸行通常不知道自己在文件的哪一节；一行短描述就能省掉一轮「这是哪个函数？」。
+      // 取不到就不写 —— 不编。
+      if (typeof snap.spot === 'string' && snap.spot !== '') out.push('> 位置：' + snap.spot)
 
       // 只发路径：正文留给模型自己去读。刻意不写成「正文未内联：<失败原因>」，
       // 因为这里根本不是失败 —— 是我们要的行为。
@@ -2034,6 +2350,14 @@ window.__ModuleLoader__.load({
       var shown = clipped ? lines.slice(0, cap) : lines
 
       for (var i = 0; i < shown.length; i++) out.push('> ' + shown[i])
+      // 大文件：正文到这里为止，剩下的在文件树右键「发送剩余部分」里接着发。
+      // 提示写成引用块自己的一行（`> …`），不塞进正文 —— 正文是文件内容本身。
+      if (snap.kind === 'file' && snap.meta !== null && snap.meta !== undefined && snap.meta.eof === false) {
+        var rest = typeof snap.meta.lines === 'number' && typeof snap.meta.endLine === 'number'
+          ? snap.meta.lines - snap.meta.endLine : null
+        out.push('> …' + (rest !== null && rest > 0 ? '（还有 ' + rest + ' 行没带' : '（后面还有内容没带')
+          + '；在这个文件上右键 →「发送剩余部分」可接着发）')
+      }
       if (clipped) {
         out.push(snap.kind === 'file'
           ? '> …（文件更长，此处只引用前 ' + cap + ' 行）'
@@ -2068,6 +2392,17 @@ window.__ModuleLoader__.load({
         return out
       }
 
+      // 表头：打开卡片时算好放在 snap.header（选区上方那一行）。不带上它，
+      // 下面第一行就会被当成 Markdown 表头 —— 列名直接是错的。用户在卡片上
+      // 取消勾选时 snap.useHeader 变 false，这里就原样发。
+      var hd = 0
+      if (snap.useHeader !== false && Array.isArray(snap.header) && snap.header.length > 0) {
+        rows = [snap.header].concat(rows)
+        hd = 1
+        var at = typeof snap.headerRow === 'number' && snap.headerRow >= 0 ? snap.headerRow + 1 : 0
+        out.push('> （表头取自选区上方' + (at > 0 ? '第 ' + at + ' 行' : '一行') + '，已一并带上）')
+      }
+
       var shown = rows.length > MAX_EXCERPT_ROWS ? rows.slice(0, MAX_EXCERPT_ROWS) : rows
       var width = 0
       for (var i = 0; i < shown.length; i++) {
@@ -2094,7 +2429,7 @@ window.__ModuleLoader__.load({
           out.push('> ' + mdCell(shown[r1] === undefined ? '' : shown[r1][0]))
         }
         if (rows.length > MAX_EXCERPT_ROWS) {
-          out.push('> …（选区共 ' + rows.length + ' 行，此处截断）')
+          out.push('> …（选区共 ' + (rows.length - hd) + ' 行，此处截断）')
         }
         return out
       }
@@ -2109,7 +2444,7 @@ window.__ModuleLoader__.load({
         }
       }
       if (rows.length > MAX_EXCERPT_ROWS) {
-        out.push('> …（选区共 ' + rows.length + ' 行，此处截断）')
+        out.push('> …（选区共 ' + (rows.length - hd) + ' 行，此处截断）')
       }
       return out
     }
@@ -2436,6 +2771,115 @@ window.__ModuleLoader__.load({
       document.addEventListener('pointerdown', onAutoCloseDown, true)
     }
 
+    // ================================================================
+    // 四·D、已发出的胶囊 → 跳回源码
+    // ================================================================
+    // 引用块折成胶囊之后，路径只剩文本。要把它变回可点的导航，借用宿主的公开
+    // 入口：
+    //   ctx.sidebarRight.openResource(url, { params: { line }, revealIfOpened })
+    // url 是 `dsh-resource://file/session/<sid>/<path>`（@deepseek-ai/
+    // dsh-util-workspace-path 的 fileAddressFor 就是拼这个），`line` 让预览滚到
+    // 第 N 行并给该行打上 `data-textpreview-target`。Excel/PDF 没有源码行号，
+    // 只打开文件、不传 line。
+    //
+    // 服务拿不到时（老宿主 / sidebarRight 未装载）整条链路静默降级：胶囊照旧
+    // 只能展开，界面不出现任何「能点」的暗示。
+    //
+    // 命中区刻意分开：**点胶囊本体 = 展开/收起**（老行为，不动），**右上角的
+    // ↗ 才跳**。合并成一个动作会让「想展开」的人被弹到右边预览去，那更烦。
+
+    function encodeSegment(s) {
+      return encodeURIComponent(String(s)).replace(/%3A/gi, ':')
+    }
+
+    /** 与 fileAddressFor 同构：绝对路径在 workspace 内就转相对，否则原样带着。 */
+    function fileAddressOf(path, sessionId, cwd) {
+      var normalized = String(path).replace(/\\/g, '/')
+      var root = typeof cwd === 'string' ? cwd.replace(/\\/g, '/').replace(/\/+$/, '') : ''
+      var rel = normalized
+      if (root !== '' && (normalized === root || normalized.indexOf(root + '/') === 0)) {
+        rel = normalized.slice(root.length).replace(/^\/+/, '')
+      }
+      rel = rel.replace(/^(?:\.\/)+/, '')
+      var enc = rel.split('/').map(encodeSegment).join('/')
+      if (sessionId === null || sessionId === undefined || sessionId === '') {
+        return 'dsh-resource://file/absolute/' + normalized.replace(/^[/\\]+/, '').split('/').map(encodeSegment).join('/')
+      }
+      return 'dsh-resource://file/session/' + encodeSegment(sessionId) + '/' + enc
+    }
+
+    /** 当前会话 id：注入时记下的那个（bridge 在没开预览页时可能是空的）。 */
+    function currentSessionId() {
+      if (bridge !== null && bridge.sessionId !== null && bridge.sessionId !== undefined && bridge.sessionId !== '') {
+        return bridge.sessionId
+      }
+      return typeof G.sessionId === 'string' ? G.sessionId : ''
+    }
+
+    /** 从折叠后的引用正文里抠出「打开哪个文件的第几行」。 */
+    function parseQuoteTarget(body) {
+      var text = String(body === null || body === undefined ? '' : body)
+      var first = text.indexOf('\n') < 0 ? text : text.slice(0, text.indexOf('\n'))
+      var m = /^\s*(?:\uD83D\uDCC4\s*)?引用来源[：:]\s*([\s\S]+?)\s*(?:（([^（）]*)）)?\s*$/.exec(first)
+      if (m === null) return null
+      var path = m[1]
+      if (!isAbsPath(path)) return null
+      var line = null
+      var lr = /第\s*(\d+)\s*(?:[-–—~]\s*(\d+))?\s*行/.exec(m[2] === undefined ? '' : m[2])
+      if (lr !== null) {
+        var n = Number(lr[1])
+        if (isFinite(n) && n >= 1) line = n
+      }
+      return { path: path, line: line }
+    }
+
+    /** host 侧有没有「打开到行」这件能力。 */
+    function canJump() {
+      var ctx = G.ctx
+      var svc = ctx === null || ctx === undefined ? null : ctx.sidebarRight
+      return svc !== null && svc !== undefined && typeof svc.openResource === 'function'
+    }
+
+    /** 打开引用指向的文件（能定位行就定位行）。 */
+    function openQuoteAt(body) {
+      var target = parseQuoteTarget(body)
+      if (target === null) return false
+      if (!canJump()) return false
+      var svc = G.ctx.sidebarRight
+      var opts = { revealIfOpened: true, params: {} }
+      if (target.line !== null) opts.params.line = target.line
+      var sid = currentSessionId()
+      var urls = []
+      if (sid !== '') urls.push(fileAddressOf(target.path, sid))
+      urls.push(fileAddressOf(target.path, ''))
+      var attempt = function (i) {
+        if (i >= urls.length) return
+        var ret
+        try { ret = svc.openResource(urls[i], opts) } catch (_) { attempt(i + 1); return }
+        if (ret !== null && ret !== undefined && typeof ret.then === 'function') {
+          ret.then(null, function () { attempt(i + 1) })
+        }
+      }
+      attempt(0)
+      return true
+    }
+
+    function makeJumpBadge(body) {
+      var badge = document.createElement('span')
+      badge.className = 'f2c-jump'
+      badge.setAttribute('role', 'button')
+      badge.setAttribute('tabindex', '-1')
+      badge.setAttribute('aria-label', '打开并定位到源码')
+      badge.appendChild(document.createTextNode('\u2197'))
+      badge.addEventListener('mousedown', function (e) { e.preventDefault() })
+      badge.addEventListener('click', function (e) {
+        e.preventDefault()
+        e.stopPropagation()
+        openQuoteAt(body)
+      })
+      return badge
+    }
+
     function makeQuoteChip(host, body, total, seq) {
       var info = describeQuote(body)
       var chip = document.createElement('span')
@@ -2443,9 +2887,25 @@ window.__ModuleLoader__.load({
       chip.setAttribute(FOLD_CHIP, '')
       chip.setAttribute('role', 'button')
       chip.setAttribute('tabindex', '0')
-      chip.title = body
+      var jumpable = canJump() && parseQuoteTarget(body) !== null
+      // 标题只放前几行：整段正文的 tooltip 会盖住半屏，展开就能看到全文。
+      var lines = String(body).split('\n')
+      var hint = lines.slice(0, 3).join('\n') + (lines.length > 3 ? '\n…（共 ' + lines.length + ' 行）' : '')
+      chip.title = jumpable ? hint + '\n\n点击展开/收起 · 右上角 ↗ 打开并定位' : hint
       chip.appendChild(makeIcon())
       chip.appendChild(document.createTextNode(info.label + (total > 1 ? ' #' + seq : '')))
+      if (jumpable) {
+        chip.className = 'f2c-sent is-jump'
+        // 只在悬停时才放徽标：平时不占视觉预算，也不改变点击热区。
+        chip.addEventListener('mouseenter', function () {
+          if (chip.querySelector('.f2c-jump') !== null) return
+          chip.appendChild(makeJumpBadge(body))
+        })
+        chip.addEventListener('mouseleave', function () {
+          var b = chip.querySelector('.f2c-jump')
+          if (b !== null && b.parentNode === chip) chip.removeChild(b)
+        })
+      }
       // 合上：只在确实开着的时候动手，避免无谓的重排。
       var close = function () {
         var raw = host.__f2cRaw
@@ -2462,6 +2922,11 @@ window.__ModuleLoader__.load({
       var toggle = function (e) {
         e.preventDefault()
         e.stopPropagation()
+        // Ctrl/⌘+点击是「跳过去」的快捷方式，给键盘熟手用的；普通点击仍是展开。
+        if (jumpable && (e.ctrlKey === true || e.metaKey === true)) {
+          openQuoteAt(body)
+          return
+        }
         if (host.getAttribute(FOLD_DONE) === 'open') {
           autoCloseNow()
           close()
@@ -2994,6 +3459,17 @@ window.__ModuleLoader__.load({
             clearMenu()
             openFileCard(path, x, y, '整份文件')
           }))
+          // 上次只发了前 200 行时，给一个接着发的入口。没有游标就不出现 ——
+          // 菜单项只在真的还有剩的时候才该占位置。
+          var next = cursorOf(path)
+          if (next !== null) {
+            menu.appendChild(menuItem('发送剩余部分（第 ' + next + ' 行起）', (function (from) {
+              return function () {
+                clearMenu()
+                openFileCard(path, x, y, '第 ' + from + ' 行起', from)
+              }
+            })(next)))
+          }
         }
         // 文件与目录都适用：文件交给它的关联程序（等同双击），目录交给文件管理器。
         menu.appendChild(menuItem('用默认程序打开', function () {
@@ -3012,6 +3488,11 @@ window.__ModuleLoader__.load({
             copyToClipboard(rel)
           }))
         }
+        // 诊断入口跟着文件菜单走：这是用户手里唯一「随手就能右键到」的地方。
+        menu.appendChild(menuItem('插件体检', function () {
+          clearMenu()
+          showHealth(x, y)
+        }))
         menu.addEventListener('mousedown', function (e) { e.preventDefault() })
         menu.addEventListener('click', function (e) { e.stopPropagation() })
         // 先藏起来再量尺寸，免得在 (0,0) 闪一下。
@@ -3092,9 +3573,9 @@ window.__ModuleLoader__.load({
         })
       }
 
-      function openFileCard(path, x, y, label) {
+      function openFileCard(path, x, y, label, fromLine) {
         openLoadedCard(label, path, x, y, function (done) {
-          readFileForChat(ctx, readSessionId(), path, done)
+          readFileForChat(ctx, readSessionId(), path, done, fromLine)
         })
       }
 
@@ -3117,6 +3598,349 @@ window.__ModuleLoader__.load({
           listDirForChat(ctx, readSessionId(), path, done)
         })
       }
+
+      // ==============================================================
+      // 插件体检：把 anchorCensus / capabilityCensus 的结论摆成一张能看的卡片
+      // ==============================================================
+      // 这两个普查以前只往 console 里写 —— 用户装了插件、功能悄悄没了，
+      // 打开控制台的概率约等于零。做成卡片之后，「哪儿断了、缺的是哪个服务」
+      // 用户自己就能看见，也方便把整段诊断信息复制出来找人问。
+      function healthCapRows() {
+        var rows = []
+        for (var i = 0; i < F2C_CAPS.length; i++) {
+          var ok = false
+          try { ok = F2C_CAPS[i][3](ctx) === true } catch (err) { ok = false }
+          rows.push({ ok: ok, name: F2C_CAPS[i][0], target: F2C_CAPS[i][1], use: F2C_CAPS[i][2] })
+        }
+        return rows
+      }
+
+      function healthAnchorRows() {
+        var rows = []
+        for (var i = 0; i < F2C_ANCHORS.length; i++) {
+          var ok = false
+          try { ok = document.querySelector(F2C_ANCHORS[i][1]) !== null } catch (err) { ok = false }
+          rows.push({ ok: ok, name: F2C_ANCHORS[i][0] })
+        }
+        return rows
+      }
+
+      function healthDigest() {
+        var caps = healthCapRows()
+        var ancs = healthAnchorRows()
+        var out = ['dsh-file-to-chat ' + F2C_VERSION]
+        try { out.push('UA: ' + String(navigator.userAgent)) } catch (err) { void err }
+        out.push('', '[服务能力]')
+        var i
+        for (i = 0; i < caps.length; i++) {
+          out.push((caps[i].ok ? 'OK  ' : 'MISS') + ' ' + caps[i].name + ' — ' + caps[i].target)
+        }
+        out.push('', '[DOM 锚点]')
+        for (i = 0; i < ancs.length; i++) out.push((ancs[i].ok ? 'OK  ' : 'MISS') + ' ' + ancs[i].name)
+        var bad = 0
+        for (i = 0; i < caps.length; i++) if (!caps[i].ok) bad++
+        for (i = 0; i < ancs.length; i++) if (!ancs[i].ok) bad++
+        out.push('', bad === 0
+          ? '结论：全部就绪，插件应当可用。'
+          : '结论：有 ' + bad + ' 项取不到，对应功能会静默失效。')
+        return out.join('\n')
+      }
+
+      /** 体检卡片：一行一项，左侧 ✅/❌，后面跟「缺了就影响什么」。 */
+      function showHealth(x, y, quiet) {
+        var atX = typeof x === 'number' ? x : Math.max(16, window.innerWidth / 2 - 170)
+        var atY = typeof y === 'number' ? y : 120
+        clearAll()
+        var caps = healthCapRows()
+        var ancs = healthAnchorRows()
+
+        card = document.createElement('div')
+        card.className = 'f2c-card is-health'
+
+        var head = document.createElement('div')
+        head.className = 'f2c-card-head'
+        var title = document.createElement('span')
+        title.className = 'f2c-src'
+        title.textContent = '插件体检 · v' + F2C_VERSION
+        head.appendChild(title)
+        card.appendChild(head)
+
+        var body = document.createElement('div')
+        body.className = 'f2c-health'
+
+        function section(label) {
+          var s = document.createElement('div')
+          s.className = 'f2c-health-sec'
+          s.textContent = label
+          body.appendChild(s)
+        }
+
+        function row(ok, name, extra) {
+          var r = document.createElement('div')
+          r.className = ok ? 'f2c-health-row is-ok' : 'f2c-health-row is-bad'
+          var dot = document.createElement('span')
+          dot.className = 'f2c-health-dot'
+          dot.textContent = ok ? '✓' : '✕'
+          r.appendChild(dot)
+          var nm = document.createElement('span')
+          nm.className = 'f2c-health-name'
+          nm.textContent = name
+          r.appendChild(nm)
+          if (extra !== undefined && extra !== '') {
+            var ex = document.createElement('span')
+            ex.className = 'f2c-health-use'
+            ex.textContent = extra
+            r.appendChild(ex)
+          }
+          body.appendChild(r)
+          return r
+        }
+
+        var i
+        var bad = 0
+        section('服务能力')
+        for (i = 0; i < caps.length; i++) {
+          if (!caps[i].ok) bad++
+          row(caps[i].ok, caps[i].name, caps[i].use + '（' + caps[i].target + '）')
+        }
+        section('DOM 锚点')
+        for (i = 0; i < ancs.length; i++) {
+          if (!ancs[i].ok) bad++
+          row(ancs[i].ok, ancs[i].name, '')
+        }
+
+        var verdict = document.createElement('div')
+        verdict.className = bad === 0 ? 'f2c-health-verdict is-ok' : 'f2c-health-verdict is-bad'
+        verdict.textContent = bad === 0
+          ? '全部就绪，插件应当可用。'
+          : '有 ' + bad + ' 项取不到 —— 对应功能会静默失效，多半是 DSH 改了服务名或层级。'
+        body.appendChild(verdict)
+        card.appendChild(body)
+
+        var foot = document.createElement('div')
+        foot.className = 'f2c-card-foot'
+        var copyBtn = document.createElement('button')
+        copyBtn.type = 'button'
+        copyBtn.className = 'f2c-menu-btn'
+        copyBtn.textContent = '复制诊断信息'
+        copyBtn.addEventListener('mousedown', function (e) { e.preventDefault() })
+        copyBtn.addEventListener('click', function (e) {
+          e.preventDefault()
+          copyToClipboard(healthDigest())
+          copyBtn.textContent = '已复制 ✓'
+        })
+        var again = document.createElement('button')
+        again.type = 'button'
+        again.className = 'f2c-menu-btn'
+        again.textContent = '重新检测'
+        again.addEventListener('mousedown', function (e) { e.preventDefault() })
+        again.addEventListener('click', function (e) { e.preventDefault(); showHealth(atX, atY) })
+        var close = document.createElement('button')
+        close.type = 'button'
+        close.className = 'f2c-send'
+        close.textContent = '关闭'
+        close.addEventListener('mousedown', function (e) { e.preventDefault() })
+        close.addEventListener('click', function (e) { e.preventDefault(); clearAll() })
+        foot.appendChild(copyBtn)
+        foot.appendChild(again)
+        foot.appendChild(close)
+        card.appendChild(foot)
+
+        if (quiet !== true && bad > 0) {
+          // 卡片的文字已经在说哪里断了；控制台留一份供排查。
+          dbg('体检：' + bad + ' 项不可用\n' + healthDigest())
+        }
+
+        layer.appendChild(card)
+        var box = { width: 360, height: 320 }
+        try {
+          var rect = card.getBoundingClientRect()
+          if (rect.width > 0 && rect.height > 0) box = { width: rect.width, height: rect.height }
+        } catch (_) { /* 用兜底尺寸 */ }
+        var left = Math.min(atX, Math.max(8, window.innerWidth - box.width - 8))
+        var top = Math.min(atY, Math.max(8, window.innerHeight - box.height - 8))
+        card.style.left = left + 'px'
+        card.style.top = top + 'px'
+        return card
+      }
+
+      // 控制台入口：功能全都不响应时，用户至少还能 `__dshFileToChat.openHealth()`。
+      G.openHealth = function (x, y) { return showHealth(x, y) }
+
+      // ==============================================================
+      // 引用篮：几处引用先攒着，最后一次性插进草稿
+      // ==============================================================
+      // 「打开卡片 → 发送 → 再打开 → 再发送」在要引三份材料时会变成一串胶囊，
+      // 顺序还容易搞乱。攒在篮子里，插入前能删、能调顺序，一次落进草稿。
+      var basketPill = null
+      var basketPanel = null
+
+      function basketList() {
+        if (!Array.isArray(G.basket)) G.basket = []
+        return G.basket
+      }
+
+      function basketAdd(snap, noteText) {
+        var list = basketList()
+        list.push({
+          id: 'b' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+          label: chipLabel(snap),
+          block: composeBlock(snap, ''),
+          note: String(noteText === null || noteText === undefined ? '' : noteText).trim(),
+        })
+        paintBasket()
+      }
+
+      function clearBasketPanel() {
+        if (basketPanel !== null && basketPanel.parentNode !== null) basketPanel.parentNode.removeChild(basketPanel)
+        basketPanel = null
+      }
+
+      /** 右下角那枚常驻小胶囊：篮子里有东西才出现。 */
+      function paintBasket() {
+        var n = basketList().length
+        if (n === 0) {
+          if (basketPill !== null && basketPill.parentNode !== null) basketPill.parentNode.removeChild(basketPill)
+          basketPill = null
+          clearBasketPanel()
+          return
+        }
+        if (basketPill === null) {
+          basketPill = document.createElement('button')
+          basketPill.type = 'button'
+          basketPill.className = 'f2c-basket-pill'
+          basketPill.addEventListener('mousedown', function (e) { e.preventDefault() })
+          basketPill.addEventListener('click', function (e) { e.preventDefault(); openBasket() })
+          layer.appendChild(basketPill)
+        }
+        basketPill.textContent = '引用篮 · ' + n
+      }
+
+      function basketRow(item, index, total) {
+        var row = document.createElement('div')
+        row.className = 'f2c-basket-row'
+
+        var name = document.createElement('span')
+        name.className = 'f2c-basket-name'
+        name.textContent = item.label
+        if (item.note !== '') name.title = item.note
+        row.appendChild(name)
+
+        function act(text, title, onClick, disabled) {
+          var b = document.createElement('button')
+          b.type = 'button'
+          b.className = 'f2c-basket-act'
+          b.textContent = text
+          b.title = title
+          b.disabled = disabled === true
+          b.addEventListener('mousedown', function (e) { e.preventDefault() })
+          b.addEventListener('click', function (e) { e.preventDefault(); onClick() })
+          row.appendChild(b)
+        }
+
+        act('↑', '上移', function () {
+          var list = basketList()
+          var at = list.indexOf(item)
+          if (at > 0) { list.splice(at, 1); list.splice(at - 1, 0, item); paintBasket(); openBasket() }
+        }, index === 0)
+        act('↓', '下移', function () {
+          var list = basketList()
+          var at = list.indexOf(item)
+          if (at >= 0 && at < list.length - 1) { list.splice(at, 1); list.splice(at + 1, 0, item); paintBasket(); openBasket() }
+        }, index === total - 1)
+        act('✕', '移出引用篮', function () {
+          var list = basketList()
+          var at = list.indexOf(item)
+          if (at >= 0) list.splice(at, 1)
+          paintBasket()
+          openBasket()
+        })
+        return row
+      }
+
+      function openBasket() {
+        clearBasketPanel()
+        var list = basketList()
+        if (list.length === 0) return
+        var el = document.createElement('div')
+        el.className = 'f2c-card is-basket'
+
+        var head = document.createElement('div')
+        head.className = 'f2c-card-head'
+        var title = document.createElement('span')
+        title.className = 'f2c-src'
+        title.textContent = '引用篮 · ' + list.length + ' 项（按此顺序插入）'
+        head.appendChild(title)
+        el.appendChild(head)
+
+        var body = document.createElement('div')
+        body.className = 'f2c-basket-body'
+        for (var i = 0; i < list.length; i++) body.appendChild(basketRow(list[i], i, list.length))
+        el.appendChild(body)
+
+        var foot = document.createElement('div')
+        foot.className = 'f2c-card-foot'
+        var hint = document.createElement('span')
+        hint.className = 'f2c-hint'
+        hint.textContent = '一次落进草稿，不会自动发送'
+        var insert = document.createElement('button')
+        insert.type = 'button'
+        insert.className = 'f2c-send'
+        insert.textContent = '全部插入'
+        insert.addEventListener('mousedown', function (e) { e.preventDefault() })
+        insert.addEventListener('click', function (e) {
+          e.preventDefault()
+          var n = insertBasket()
+          insert.textContent = '已插入 ' + n + ' 项 ✓'
+          setTimeout(clearBasketPanel, 600)
+        })
+        var clear = document.createElement('button')
+        clear.type = 'button'
+        clear.className = 'f2c-menu-btn'
+        clear.textContent = '清空'
+        clear.addEventListener('mousedown', function (e) { e.preventDefault() })
+        clear.addEventListener('click', function (e) {
+          e.preventDefault()
+          G.basket = []
+          paintBasket()
+        })
+        foot.appendChild(hint)
+        foot.appendChild(clear)
+        foot.appendChild(insert)
+        el.appendChild(foot)
+
+        el.addEventListener('mousedown', function (e) { e.preventDefault() })
+        el.addEventListener('click', function (e) { e.stopPropagation() })
+        layer.appendChild(el)
+        basketPanel = el
+
+        var box = { width: 380, height: 260 }
+        try {
+          var rect = el.getBoundingClientRect()
+          if (rect.width > 0 && rect.height > 0) box = { width: rect.width, height: rect.height }
+        } catch (_) { /* 兜底尺寸 */ }
+        el.style.left = Math.max(8, window.innerWidth - box.width - 16) + 'px'
+        el.style.top = Math.max(8, window.innerHeight - box.height - 76) + 'px'
+      }
+
+      /** 按篮子里的顺序逐个插入；每项都走和「发送到聊天」完全同一条路径。 */
+      function insertBasket() {
+        var list = basketList()
+        var done = 0
+        for (var i = 0; i < list.length; i++) {
+          try {
+            injectText(ctx, readSessionId(), list[i].block, list[i].label, list[i].note)
+            done++
+          } catch (err) {
+            console.warn('[file-to-chat] 引用篮第 ' + (i + 1) + ' 项插入失败：', err)
+          }
+        }
+        G.basket = []
+        paintBasket()
+        return done
+      }
+
+      G.openBasket = openBasket
 
       document.addEventListener('contextmenu', onContextMenu)
 
@@ -3186,7 +4010,24 @@ window.__ModuleLoader__.load({
             quote.appendChild(warn)
           } else {
             snap.table = got.table
-            quote.appendChild(buildGrid(got.table))
+            snap.header = Array.isArray(got.header) ? got.header : null
+            snap.headerRow = typeof got.headerRow === 'number' ? got.headerRow : -1
+            snap.useHeader = snap.header !== null
+            // 预览也把表头画进去（buildGrid 把第 0 行当 th）—— 所见即所发。
+            quote.appendChild(buildGrid(snap.useHeader ? [snap.header].concat(got.table) : got.table))
+            if (snap.useHeader) {
+              var hl = document.createElement('label')
+              hl.className = 'f2c-head'
+              var cb = document.createElement('input')
+              cb.type = 'checkbox'
+              cb.checked = true
+              cb.addEventListener('change', function () { snap.useHeader = cb.checked === true })
+              var ht = document.createElement('span')
+              ht.textContent = '带上表头（第 ' + (snap.headerRow + 1) + ' 行）'
+              hl.appendChild(cb)
+              hl.appendChild(ht)
+              quote.appendChild(hl)
+            }
           }
         } else if (snap.pathOnly === true) {
           // 「仅路径」**本来就不读文件** —— `snap.text` 是 null 属于它的正常形态，
@@ -3231,7 +4072,23 @@ window.__ModuleLoader__.load({
         send.type = 'button'
         send.className = 'f2c-send'
         send.textContent = '发送到聊天'
+        var hold = document.createElement('button')
+        hold.type = 'button'
+        hold.className = 'f2c-hold'
+        hold.textContent = '加入引用篮'
+        hold.addEventListener('mousedown', function (e) { e.preventDefault() })
+        hold.addEventListener('click', function (e) {
+          e.preventDefault()
+          if (snap === null) return
+          basketAdd(snap, note.value)
+          hold.textContent = '已暂存 ✓'
+          clearTimeout(flashTimer)
+          flashTimer = setTimeout(function () {
+            if (hold.parentNode !== null) clearAll()
+          }, 700)
+        })
         foot.appendChild(hint)
+        foot.appendChild(hold)
         foot.appendChild(send)
 
         card.appendChild(head)
@@ -3239,9 +4096,10 @@ window.__ModuleLoader__.load({
         card.appendChild(note)
         card.appendChild(foot)
 
-        // 点卡片本体不丢选区；textarea 需要真正获得焦点，故放行
+        // 点卡片本体不丢选区；textarea 需要真正获得焦点、勾选框要能点，故放行
         card.addEventListener('mousedown', function (e) {
-          if (e.target !== note) e.preventDefault()
+          var tag = e.target !== null && e.target !== undefined ? String(e.target.tagName) : ''
+          if (e.target !== note && tag !== 'INPUT' && tag !== 'LABEL') e.preventDefault()
         })
         card.addEventListener('click', function (e) { e.stopPropagation() })
 
@@ -3260,6 +4118,13 @@ window.__ModuleLoader__.load({
             // 也看得见（用户反馈：批注在输入框里被藏起来了）。
             var block = composeBlock(snap, '')
             var r = injectText(ctx, readSessionId, block, chipLabel(snap), noteText)
+            // 真的发出去了才推进续发游标：打开卡片又取消，不该算「已发过」。
+            // 只认「整份文件/续发」这种带行号的快照 —— 选区、仅路径都不带。
+            if (snap.kind === 'file' && snap.pathOnly !== true
+              && snap.meta !== null && snap.meta !== undefined
+              && typeof snap.meta.endLine === 'number') {
+              rememberCursor(snap.path, snap.meta)
+            }
             send.textContent = '已发送 ✓'
             hint.textContent = '经 ' + r.via
               + (noteText === '' ? '' : (r.noteInline === true ? ' · 批注已随文本补入' : ' · 批注并入正文'))
@@ -3655,7 +4520,15 @@ window.__ModuleLoader__.load({
 
     function apply(ctx) {
       ensureStyle()
+      // 悬停徽标（打开并定位到源码）需要 ctx.sidebarRight。放在 G 上而不是闭包里：
+      // 折叠那套 observer 挂在 document.body 上、跨 HMR 世代复用，读的必须是
+      // 当前这一代的 ctx。
+      G.ctx = ctx
       var readCurrentSessionId = makeSessionIdReader(ctx)
+      try {
+        var sid0 = readCurrentSessionId()
+        if (typeof sid0 === 'string' && sid0 !== '') G.sessionId = sid0
+      } catch (_) { /* 还没开会话：等到第一次注入时再记 */ }
       // 尽早注册引用 source（composer 的 chip 编解码）。提供 inputTriggers 的
       // 插件激活顺序不保证，因此 wireQuoteSource 内部有 ctx.inject + 定时重试。
       wireQuoteSource(ctx)
