@@ -1609,7 +1609,7 @@ window.__ModuleLoader__.load({
      * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
      * 体检卡片要靠它才能分清「用户装的是哪一版」。
      */
-    var F2C_VERSION = '1.0.6'
+    var F2C_VERSION = '1.0.7'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，
@@ -2480,6 +2480,21 @@ window.__ModuleLoader__.load({
     var FOLD_DONE = 'data-f2c-done'
     var FOLD_NOTE = 'data-f2c-note'
     var FOLDED_ROWS = new WeakSet()
+    /**
+     * 折叠的现场：这一轮扫了几行、卡在哪一步、折成几处、出过什么错。
+     * 体检卡片把它抄出去 —— 「为什么这条消息没折成胶囊」光看截图判不出来。
+     */
+    var FOLD_STAT = { rows: 0, noQuote: 0, noNl: 0, noTarget: 0, folded: 0, err: 0 }
+    var FOLD_ERRS = []
+
+    function noteFoldError(err) {
+      var s = String(err === null || err === undefined ? err : (err.message === undefined ? err : err.message))
+      if (FOLD_ERRS.indexOf(s) < 0) {
+        FOLD_ERRS.push(s)
+        if (FOLD_ERRS.length > 4) FOLD_ERRS.shift()
+      }
+      FOLD_STAT.err++
+    }
 
     // ---------------- 「封膜」：让未折叠的形态根本没有机会被绘制 ----------------
     //
@@ -3085,8 +3100,27 @@ window.__ModuleLoader__.load({
     /** 展开：还原成原样的文本。标记成 open，扫描器就不会再折回去。 */
     function renderPlain(el, raw) {
       clearChildren(el)
+      // 原文是从 innerText 取的（`<br>` 已经变成 `\n`）。写回单个文本节点时，得
+      // 让宿主按原样画换行，否则展开后又挤成一行。
+      if (String(raw).indexOf('\n') >= 0) el.style.whiteSpace = 'pre-wrap'
       el.appendChild(document.createTextNode(raw))
       el.setAttribute(FOLD_DONE, 'open')
+    }
+
+    /**
+     * 取一个消息行「渲染出来的文本」。
+     *
+     * `textContent` 只是把文本节点拼起来 —— 宿主若用 `<br>` 或块级元素分行，它
+     * 会**一个换行都不给**：引用块于是退化成一行，`splitQuoteRuns` 认不出段边界，
+     * 整条消息要么折不成、要么被整块折进一枚胶囊。`innerText` 按渲染结果取，
+     * `<br>` 和块边界都是 `\n`，正是我们需要的。取不到（元素没布局、或测试环境）
+     * 就退回 `textContent`。
+     */
+    function textOfRow(el) {
+      var t = null
+      try { t = el.innerText } catch (err) { t = null }
+      if (typeof t === 'string' && t !== '') return t
+      return el.textContent === null || el.textContent === undefined ? '' : el.textContent
     }
 
     /**
@@ -3104,6 +3138,7 @@ window.__ModuleLoader__.load({
         for (var fi = 0; fi < found.length; fi++) rows.push(found[fi])
       }
       var folded = 0
+      if (root.nodeType === 9) FOLD_STAT.rows = rows.length
       for (var i = 0; i < rows.length; i++) {
         var row = rows[i]
         try {
@@ -3130,8 +3165,8 @@ window.__ModuleLoader__.load({
             continue
           }
           // ② 行级粗筛：整条气泡里一个 `> ` 行都没有就直接走人
-          var rowText = row.textContent || ''
-          if (!/^\s*>\s?/m.test(rowText)) continue
+          var rowText = textOfRow(row)
+          if (!/^\s*>\s?/m.test(rowText)) { FOLD_STAT.noQuote++; continue }
           // ②b 换行保护（防「整条消息被折进一枚胶囊」的静默数据丢失）。
           //
           // 本插件发出的引用块**至少两行**：`> 📄 引用来源：…` 加上至少一行正文
@@ -3147,7 +3182,7 @@ window.__ModuleLoader__.load({
           // 整条消息变成一行，而「该行以 `> 📄 引用来源` 开头」依然成立：我们就会把
           // **用户整条消息**折进一枚胶囊、正文被藏起来。宁可退回「不折、显示全文」，
           // 也绝不吞掉内容。
-          if (rowText.indexOf('\n') < 0) continue
+          if (rowText.indexOf('\n') < 0) { FOLD_STAT.noNl++; continue }
 
           // ③ 找「自身含引用行、但子元素都不含」的最深容器
           var targets = []
@@ -3155,23 +3190,23 @@ window.__ModuleLoader__.load({
           for (var j = 0; j < all.length; j++) {
             var el = all[j]
             if (el.getAttribute(FOLD_CHIP) !== null) continue
-            var text = el.textContent
+            var text = textOfRow(el)
             if (text === null || text === '' || !/^\s*>\s?/m.test(text)) continue
             var childHit = false
             for (var k = 0; k < el.children.length; k++) {
-              if (/^\s*>\s?/m.test(el.children[k].textContent || '')) { childHit = true; break }
+              if (/^\s*>\s?/m.test(textOfRow(el.children[k]))) { childHit = true; break }
             }
             if (childHit) continue
             targets.push(el)
           }
-          if (targets.length === 0) continue
+          if (targets.length === 0) { FOLD_STAT.noTarget++; continue }
 
           var did = 0
           for (var n = 0; n < targets.length; n++) {
             var host = targets[n]
             // 用户手动展开过就别折回去（React 重渲染会清掉这个标记，那时重折是对的）
             if (host.getAttribute(FOLD_DONE) === 'open') continue
-            var raw = host.textContent
+            var raw = textOfRow(host)
             if (raw === null || !/^\s*>\s?/m.test(raw)) continue
             host.__f2cRaw = raw
             if (renderFold(host, raw)) did++
@@ -3179,9 +3214,11 @@ window.__ModuleLoader__.load({
           if (did > 0) FOLDED_ROWS.add(row)
           folded += did
         } catch (err) {
+          noteFoldError(err)
           console.warn('[file-to-chat] 折叠已发送引用块失败：', err)
         }
       }
+      if (folded > 0) FOLD_STAT.folded += folded
       if (folded > 0) dbg('折 ' + folded + ' 处 候选=' + rows.length)
       return folded
     }
@@ -3733,13 +3770,28 @@ window.__ModuleLoader__.load({
           out.push('seen=' + (row.getAttribute('data-f2c-seen') !== null)
             + ' held=' + (row.getAttribute(HOLD_ATTR) !== null)
             + ' done=' + (row.getAttribute(FOLD_DONE) === null ? '-' : row.getAttribute(FOLD_DONE)))
-          out.push('文本长度=' + ((row.textContent || '').length)
+          var tc = row.textContent || ''
+          var it = ''
+          try { it = String(row.innerText) } catch (err) { it = '' }
+          out.push('文本长度=' + tc.length
+            + ' 换行数(textContent)=' + (tc.split('\n').length - 1)
+            + ' 换行数(innerText)=' + (it.split('\n').length - 1)
+            + ' br=' + row.querySelectorAll('br').length
+            + ' 元素=' + row.querySelectorAll('*').length
             + ' 直接子元素=' + row.children.length
             + ' img=' + row.querySelectorAll('img').length
             + ' 胶囊=' + row.querySelectorAll('[' + FOLD_CHIP + ']').length)
-          out.push('HTML: ' + String(row.outerHTML).replace(/\s+/g, ' ').slice(0, 900))
+          out.push('文本前 160 字（转义）：' + JSON.stringify(tc.slice(0, 160)))
+          out.push('HTML: ' + String(row.outerHTML).replace(/\s+/g, ' ').slice(0, 700))
         } catch (err) {
           out.push('（读取失败：' + err + '）')
+        }
+        out.push('', '[折叠] 扫描=' + FOLD_STAT.rows + ' 无引用行=' + FOLD_STAT.noQuote
+          + ' 无换行=' + FOLD_STAT.noNl + ' 无容器=' + FOLD_STAT.noTarget
+          + ' 折成=' + FOLD_STAT.folded + ' 出错=' + FOLD_STAT.err)
+        if (FOLD_ERRS.length > 0) {
+          out.push('[折叠错误]')
+          for (var e = 0; e < FOLD_ERRS.length; e++) out.push('  ' + FOLD_ERRS[e])
         }
         return out.join('\n')
       }
