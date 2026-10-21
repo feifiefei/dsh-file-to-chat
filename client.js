@@ -1609,7 +1609,7 @@ window.__ModuleLoader__.load({
      * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
      * 体检卡片要靠它才能分清「用户装的是哪一版」。
      */
-    var F2C_VERSION = '1.0.7'
+    var F2C_VERSION = '1.0.8'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，
@@ -3785,6 +3785,39 @@ window.__ModuleLoader__.load({
           out.push('HTML: ' + String(row.outerHTML).replace(/\s+/g, ' ').slice(0, 700))
         } catch (err) {
           out.push('（读取失败：' + err + '）')
+        }
+        // 图片：宿主把附件画成 <img src="blob:dsh-app://…">。刷新后旧 blob 失效时，
+        // img 会停在 naturalWidth=0，而外框的宽高是内联写死的 —— 画面上就是一块
+        // 定高的空白。这个计数能把「空白是不是坏的图片」一次问清。
+        try {
+          var imgs = document.querySelectorAll('img')
+          var broken = 0
+          for (var b = 0; b < imgs.length; b++) {
+            var im = imgs[b]
+            if (im.complete === true && im.naturalWidth === 0) broken++
+          }
+          out.push('页面图片 ' + imgs.length + ' 张，其中加载失败 ' + broken + ' 张')
+        } catch (err) {
+          out.push('（图片统计失败：' + err + '）')
+        }
+        // 最后三条用户消息的摘要：截图里那块空白到底是哪一条，一眼对上号。
+        try {
+          var all = document.querySelectorAll('[data-chat-flow-kind="user"]')
+          out.push('[最近三条用户消息]')
+          for (var q = Math.max(0, all.length - 3); q < all.length; q++) {
+            var r2 = all[q]
+            var t2 = ''
+            try { t2 = String(r2.innerText) } catch (err) { t2 = '' }
+            var ii = r2.querySelectorAll('img')
+            var bb = 0
+            for (var w = 0; w < ii.length; w++) if (ii[w].complete === true && ii[w].naturalWidth === 0) bb++
+            out.push('  #' + (q + 1) + ' 字=' + (r2.textContent || '').length
+              + ' img=' + ii.length + '(坏 ' + bb + ')'
+              + ' done=' + (r2.getAttribute(FOLD_DONE) === null ? '-' : r2.getAttribute(FOLD_DONE))
+              + ' 首行=' + JSON.stringify(t2.split('\n')[0].slice(0, 40)))
+          }
+        } catch (err) {
+          out.push('（最近消息统计失败：' + err + '）')
         }
         out.push('', '[折叠] 扫描=' + FOLD_STAT.rows + ' 无引用行=' + FOLD_STAT.noQuote
           + ' 无换行=' + FOLD_STAT.noNl + ' 无容器=' + FOLD_STAT.noTarget
