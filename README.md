@@ -134,7 +134,7 @@ Web 端把 `desktop` 换成 `web`。
 
 ## 已知限制
 
-- **只有右侧栏能触发。** 右侧栏未激活的标签页内容不挂载，所以预览没打开时工具栏上不会有入口（文件树那个座位上只挂一个不渲染任何东西的桥接组件）。
+- **只有右侧栏能触发。** 右侧栏未激活的标签页内容不挂载，所以预览没打开时不会有入口。工具栏上**没有按钮**：入口是选区上方浮出的那一枚（两个座位上挂的都是不渲染任何东西的桥接组件）。
 - **Word/PPT/PDF 没有行号**，只能定位到页码 —— 这类文件走的是「Office → PDF → PDF.js」渲染链，页内没有源码行这个概念。
 - **Excel 只取当前工作表**；`.xlsx` 公式取缓存值而非重算。表头是靠「选区上方那一行填得够满」猜的，猜错时卡片上可以关掉。
 - **大文件一次只带 200 行**，剩下的靠「发送剩余部分」接着发 —— 不会静默丢内容。
@@ -147,12 +147,11 @@ Web 端把 `desktop` 换成 `web`。
 
 ## 实现说明（给维护者和审核者）
 
-这个插件**没有宿主路由、没有额外的 Node 依赖**，宿主半边（`lib/index.js`）是空的 —— 它的存在只是为了在 Loader 里占一行。全部逻辑在 `client.js`（浏览器半边，手写 CJS + `window.__ModuleLoader__` 包装，只有 `require('react')` 一个依赖）。
+这个插件**没有宿主路由、没有额外的 Node 依赖**，宿主半边（`lib/index.js`）是空的 —— 它的存在只是为了在 Loader 里占一行。全部逻辑在 `client.js`（浏览器半边，手写 CJS + `window.__ModuleLoader__` 包装），**连 `require('react')` 都不需要** —— 界面上唯一的 React 组件是不渲染任何东西的座位桥。
 
 用到的官方扩展点：
 
-- `sidebar.right.tab.document.actions` —— 工具栏入口（「批注」提示按钮）
-- `sidebar.right.tab.files.actions` —— 不摆按钮，只借这个座位拿 `inputActions` / `sessionId` / `draft`
+- `sidebar.right.tab.document.actions` / `sidebar.right.tab.files.actions` —— 两个座位都只挂桥接组件，不摆按钮；借它们拿 `inputActions` / `sessionId` / `absolutePath` / `draft`
 - `inputTriggers.registerSource` —— 输入框胶囊的注册与提交时的序列化编解码
 - `conversation.input.for(scope)` → `insertReference(span, ref)` —— 把胶囊插进 Lexical 草稿
 - `remote.workspaceFiles.read` / `readBytes` —— 读工作区文件（`read` 的 `range.offset` 用来续发）

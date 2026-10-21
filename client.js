@@ -52,8 +52,7 @@ window.__ModuleLoader__.load({
     var module = { exports: {} }
     var exports = module.exports
 
-    var React = require('react')
-
+    // 只借座位，不渲染 —— 所以这里不再 require('react')。
     var Z_BAR = 1200
     var Z_CARD = 1201
     var Z_MENU = 1202
@@ -1610,7 +1609,7 @@ window.__ModuleLoader__.load({
      * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
      * 体检卡片要靠它才能分清「用户装的是哪一版」。
      */
-    var F2C_VERSION = '1.0.3'
+    var F2C_VERSION = '1.0.4'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，
@@ -4338,22 +4337,15 @@ window.__ModuleLoader__.load({
         // 真正的收膜时机是「刚到达的那一行已经露面」，见 holdNewRows / markSeen。
         if (CHIP_MARK_RE.test(draft)) sealOn()
 
-        // 文件树那座**不摆按钮**：那里只有一棵目录树，没有任何「可划选的内容」，
-        // 一枚点不动的「批注」纯属占地方（用户反馈：留着没用）。
+        // **两个座位上都不摆按钮**。
+        // 文件树那座：那里只有一棵目录树，没有任何「可划选的内容」。
+        // 文档预览那座：真正干活的是**选区上方浮出的**那枚「批注」按钮，
+        //   工具栏这枚只是个常驻提示 —— 用户在两种预览上都反馈过「占地方」。
         // 但组件本身还得挂着 —— 它的另一份差事是把 inputActions / sessionId /
-        // draft 桥给命令式代码：从文件树右键发出的引用退化成纯文本时，要靠
-        // bridge.inputActions 写进草稿、靠 bridge.sessionId 认会话。
-        if (!isDocSeat) return null
-
-        return React.createElement('span', {
-          className: 'f2c-chip',
-          title: '文本预览：划选文本，选区上方出现「批注」按钮。\n'
-            + '表格预览：在表格里拖选区域，随后点「批注」即可按区域取值发送。\n'
-            + 'Word/PPT/PDF：在 PDF 文字层里划选，按「第 N 页」定位（这类预览没有源码行号）。',
-        }, React.createElement('span', {
-          className: 'f2c-ic',
-          dangerouslySetInnerHTML: { __html: ICON_ANNOTATE },
-        }), '批注')
+        // absolutePath / draft 桥给命令式代码：从文件树右键发出的引用退化成
+        // 纯文本时要靠 bridge.inputActions 写进草稿、靠 bridge.sessionId 认会话、
+        // 靠 bridge.absolutePath 认划词引用来自哪个文件。
+        return null
       }
     }
 
