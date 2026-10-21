@@ -76,6 +76,19 @@ eq('⑥ 盘符的冒号保持字面量', api.fileAddressOf('D:\\x.js', 's2', '')
 eq('⑦ 反斜杠统一成斜杠', api.fileAddressOf('C:\\a\\b\\c.js', 's', ''), 'dsh-resource://file/session/s/C:/a/b/c.js')
 eq('⑧ 相对路径', api.fileAddressOf('src/a.js', 's', ''), 'dsh-resource://file/session/s/src/a.js')
 
+console.log('— 服务访问 —')
+// 2026-10-21 的真实事故：`ctx.sidebarRight` 是没写进 exports.inject 的可选服务，
+// cordis 的严格访问一读就抛 `cannot get property "sidebarRight" without inject`。
+// 这一抛落在 makeQuoteChip → canJump 里，后果是**所有带引用块的消息都折不起来**，
+// 而且被 renderFold 的兜底 catch 咽掉，表面看只是「没折」。必须只走 ctx.get。
+const badAccess = src.split('\n').filter(function (line) {
+  const t = line.trim()
+  if (t.indexOf('//') === 0 || t.indexOf('*') === 0 || t.indexOf('/*') === 0) return false
+  return /ctx\.sidebarRight/.test(line)
+})
+eq('⑨ 源码里不直接读 ctx.sidebarRight', badAccess, [])
+eq('⑩ 改用 ctx.get 安全读取', /ctx\.get\('sidebarRight'\)/.test(src), true)
+
 console.log('')
 console.log(pass + ' passed, ' + fail + ' failed')
 process.exit(fail === 0 ? 0 : 1)

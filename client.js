@@ -1609,7 +1609,7 @@ window.__ModuleLoader__.load({
      * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
      * 体检卡片要靠它才能分清「用户装的是哪一版」。
      */
-    var F2C_VERSION = '1.0.9'
+    var F2C_VERSION = '1.0.10'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，
@@ -2913,10 +2913,30 @@ window.__ModuleLoader__.load({
       return { path: path, line: line }
     }
 
+    /**
+     * 取右栏服务（可选依赖）。
+     *
+     * **绝不能用 `ctx.sidebarRight` 直接读**：cordis 对没写进 `exports.inject` 的
+     * 服务做成严格访问，属性一读就抛 `cannot get property "sidebarRight" without
+     * inject`。这一抛落在折叠路径里，后果是**每一条带引用块的消息都折不起来**
+     * （2026-10-21 用户实测：引用块在聊天里原样摊着；更早的版本还会因此把消息
+     * 清成空白 —— 那时 renderFold 是先清空再重建）。
+     * `ctx.get(name)` 是同一个服务的**安全读取**：拿不到就给 undefined。
+     */
+    function jumpService() {
+      var ctx = G.ctx
+      if (ctx === null || ctx === undefined || typeof ctx.get !== 'function') return null
+      try {
+        var svc = ctx.get('sidebarRight')
+        return svc === undefined ? null : svc
+      } catch (_) {
+        return null
+      }
+    }
+
     /** host 侧有没有「打开到行」这件能力。 */
     function canJump() {
-      var ctx = G.ctx
-      var svc = ctx === null || ctx === undefined ? null : ctx.sidebarRight
+      var svc = jumpService()
       return svc !== null && svc !== undefined && typeof svc.openResource === 'function'
     }
 
@@ -2925,7 +2945,8 @@ window.__ModuleLoader__.load({
       var target = parseQuoteTarget(body)
       if (target === null) return false
       if (!canJump()) return false
-      var svc = G.ctx.sidebarRight
+      var svc = jumpService()
+      if (svc === null || typeof svc.openResource !== 'function') return false
       var opts = { revealIfOpened: true, params: {} }
       if (target.line !== null) opts.params.line = target.line
       var sid = currentSessionId()

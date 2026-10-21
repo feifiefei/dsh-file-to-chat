@@ -2,6 +2,17 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。日期为 `YYYY-MM-DD`。
 
+## [1.0.10] — 2026-10-21
+
+### 修复
+
+- **带引用块的消息一律折不成胶囊**（1.0.3 起，`折成=0`、`假=46`、`出错=46`）。根因：胶囊要判断「能不能跳回源码」，那里直接读了 `ctx.sidebarRight`，而 `sidebarRight` 是**没写进 `exports.inject` 的可选服务** —— cordis 对未声明服务是严格访问，属性一读就抛 `cannot get property "sidebarRight" without inject`；这一抛落在 `makeQuoteChip` 里，被 `renderFold` 的兜底 `catch` 咽掉，表面上只是「没折」。现在统一走 `ctx.get('sidebarRight')`（拿不到返回 `undefined`，不抛），跳回能力照旧「有就用、没有就静默降级」。
+- 更早版本的「发出去一片空白（复制按钮却有字）」也是这条抛错：那一版 `renderFold` 是**先清空这一行、再逐块补回**，`makeQuoteChip` 抛在中间，于是行被清空、什么都没补上；附件图和时间戳不在被清空的那个容器里，所以还留在画面上 —— 与用户截图（一个字都不剩、图片还在）完全一致。
+
+### 新增
+
+- 回归用例里加了一条源码级守卫：`client.js` 里**不允许出现 `ctx.sidebarRight` 这种直接读取**，只能用 `ctx.get('sidebarRight')`。这类错误编译器看不出来、跑起来也只在特定路径炸，只能靠断言盯着。
+
 ## [1.0.9] — 2026-10-21
 
 ### 新增
