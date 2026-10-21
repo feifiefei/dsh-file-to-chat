@@ -1609,7 +1609,7 @@ window.__ModuleLoader__.load({
      * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
      * 体检卡片要靠它才能分清「用户装的是哪一版」。
      */
-    var F2C_VERSION = '1.0.10'
+    var F2C_VERSION = '1.0.11'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，
@@ -3658,11 +3658,8 @@ window.__ModuleLoader__.load({
             copyToClipboard(rel)
           }))
         }
-        // 诊断入口跟着文件菜单走：这是用户手里唯一「随手就能右键到」的地方。
-        menu.appendChild(menuItem('插件体检', function () {
-          clearMenu()
-          showHealth(x, y)
-        }))
+        // 诊断入口不进菜单（2026-10-21 用户要求去掉：右键菜单只放日常动作）。
+        // 需要时仍有两条路：控制台 `__dshFileToChat.openHealth()`。
         menu.addEventListener('mousedown', function (e) { e.preventDefault() })
         menu.addEventListener('click', function (e) { e.stopPropagation() })
         // 先藏起来再量尺寸，免得在 (0,0) 闪一下。
