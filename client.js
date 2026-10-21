@@ -1609,7 +1609,7 @@ window.__ModuleLoader__.load({
      * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
      * 体检卡片要靠它才能分清「用户装的是哪一版」。
      */
-    var F2C_VERSION = '1.0.4'
+    var F2C_VERSION = '1.0.5'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，
@@ -2508,7 +2508,60 @@ window.__ModuleLoader__.load({
     // 绝对上限，且**每次 sealOn 都重新计时**，所以它的语义是「距最后一次确认
     // 已经过去多久」，而不是「总时长」。只有这样，用户在输入框里慢慢写批注
     // 也不会把膜等没。
-    var SEAL_MAX_MS = 600000
+    //
+    // 2026-10-21：从 10 分钟收到 30 秒。藏住一条消息只是为了让「先全文、再折叠」
+    // 那个中间形态来不及被画出来，一秒都嫌多；而它的代价是**用户的消息真的看不见**。
+    // 任何「宁可藏久一点」的时机优化，在「消息消失」面前都不值。
+    var SEAL_MAX_MS = 30000
+
+    // 放开被按住/被膜压着的行时用的**最短**看门狗周期。按住那道保险的兜底是
+    // 1500ms 的 setTimeout，但那个定时器挂在「被按住的那一个节点」上 —— 一旦
+    // React 把那行换掉、或者折叠那一路抛异常，它就再也不会跑到。封膜那条 CSS
+    // 规则却没有保质期：只要 body 上还挂着 data-f2c-seal，没有 seen 的行就一直
+    // 不可见。这条看门狗是**与节点无关**的最后一道：只要还有被按住的、或者封膜
+    // 压着的行，就隔一秒放一批。宁可闪一下，绝不把用户的消息藏起来。
+    var REVEAL_WATCH_MS = 1200
+    var REVEAL_TIMER = 0
+    var SEAL_SEL = '[data-chat-flow-kind="user"]:not([data-f2c-seen]),'
+      + ' [data-chat-flow-kind="steering"]:not([data-f2c-seen]),'
+      + ' [data-pending-steering]:not([data-f2c-seen]),'
+      + ' [data-submission-echo]:not([data-f2c-seen])'
+
+    /** 无条件把一行放开（不管它是不是被我们按住的），但不收膜。 */
+    function forceReveal(row) {
+      try {
+        if (row.getAttribute('data-f2c-seen') === null) row.setAttribute('data-f2c-seen', '')
+        if (row.style !== undefined && row.style.visibility === 'hidden') row.style.visibility = ''
+        row.removeAttribute(HOLD_ATTR)
+      } catch (err) { void err }
+    }
+
+    function startRevealWatch() {
+      if (REVEAL_TIMER !== 0) return
+      var tick = function () {
+        var held = null
+        var sealing = false
+        try {
+          held = document.querySelectorAll('[' + HOLD_ATTR + ']')
+          sealing = document.body !== null && document.body.getAttribute(SEAL_ATTR) !== null
+        } catch (err) { held = null }
+        if (held !== null) {
+          for (var i = 0; i < held.length; i++) forceReveal(held[i])
+        }
+        if (sealing) {
+          try {
+            var hidden = document.querySelectorAll(SEAL_SEL)
+            for (var j = 0; j < hidden.length; j++) forceReveal(hidden[j])
+          } catch (err2) { void err2 }
+        }
+        // 既没有被按住的、封膜也收了 —— 看门狗可以歇了（下次按住时再开）。
+        if ((held === null || held.length === 0) && !sealing) {
+          clearInterval(REVEAL_TIMER)
+          REVEAL_TIMER = 0
+        }
+      }
+      REVEAL_TIMER = setInterval(tick, REVEAL_WATCH_MS)
+    }
     function sealOn() {
       if (SEAL_OFF_TIMER !== 0) { clearTimeout(SEAL_OFF_TIMER); SEAL_OFF_TIMER = 0 }
       try {
@@ -2523,6 +2576,7 @@ window.__ModuleLoader__.load({
           SEAL_MAX_TIMER = 0
           sealOffNow()
         }, SEAL_MAX_MS)
+        startRevealWatch()
       } catch (err) { void err }
     }
     function sealOffNow() {
@@ -2542,6 +2596,16 @@ window.__ModuleLoader__.load({
         sealOffNow()
       }, SEAL_GRACE_MS)
     }
+    function hasPaintableContent(row) {
+      try {
+        if ((row.textContent || '') !== '') return true
+        // 只发图片/附件的那条消息永远等不来文字，但它**有东西可画**。
+        return row.querySelector('img, picture, video, canvas, audio') !== null
+      } catch (err) {
+        return true   // 判断不了就当有内容 —— 宁可闪，不可藏
+      }
+    }
+
     /** 标记这一行已被我们处理过（折过，或确认无需折叠）。属性写入不被观察，不会自激。 */
     function markSeen(row) {
       try {
@@ -3037,7 +3101,10 @@ window.__ModuleLoader__.load({
           // ⓪ 揭膜。**空行先别揭**：React 往往先挂一个空壳、下一批变更才把正文
           //    写进来；提前揭膜等于把「正文到货之前那一帧」暴露出去，那恰恰就是
           //    闪动的来源。这里下面的处理是同步的，所以揭膜与折叠仍属同一次微任务。
-          if ((row.textContent || '') !== '') markSeen(row)
+          //    但「没有文字」不等于「没有内容」—— 只发图片/附件的消息永远等不来
+          //    文字，按老条件它就一直不揭膜，于是那条消息**一直是空的**（2026-10-21
+          //    用户实测）。有可绘制的东西就揭。
+          if (hasPaintableContent(row)) markSeen(row)
           // ① 折过、且 chip 仍在 → 跳过。省掉下面 textContent 这种要拷贝整段
           //    文本的操作 —— 流式回答期间这个函数每帧都可能被叫醒。
           if (FOLDED_ROWS.has(row) && row.querySelector('[' + FOLD_CHIP + ']') !== null) {
@@ -3175,6 +3242,7 @@ window.__ModuleLoader__.load({
           }, 1500)
         })(row)
       }
+      if (list.length > 0) startRevealWatch()
     }
 
     function foldIn(node) {
