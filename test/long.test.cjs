@@ -28,12 +28,14 @@ function numConst(name) {
 }
 
 const code = [
+  'var G = { refBodies: new Map() }',
   'var LONG_TEXT_LINES = ' + numConst('LONG_TEXT_LINES'),
   'var LONG_TEXT_CHARS = ' + numConst('LONG_TEXT_CHARS'),
   extract('function isLongText(text)'),
   extract('function longTextLabel(text)'),
   extract('function longTextPreview(text, max)'),
-  'return { isLongText: isLongText, longTextLabel: longTextLabel, longTextPreview: longTextPreview }',
+  extract('function pasteSplit(text)'),
+  'return { isLongText: isLongText, longTextLabel: longTextLabel, longTextPreview: longTextPreview, pasteSplit: pasteSplit, G: G }',
 ].join('\n')
 
 const api = new Function(code)()
@@ -68,6 +70,44 @@ eq('⑬ 超 60 字截断', api.longTextPreview('x'.repeat(80)), 'x'.repeat(60) +
 eq('⑭ 全空 → 空串', api.longTextPreview('\n \n'), '')
 eq('⑮ 刚好 60 字不加省略号', api.longTextPreview('y'.repeat(60)), 'y'.repeat(60))
 eq('⑯ 卡片上只用 30 字', api.longTextPreview('z'.repeat(50), 30), 'z'.repeat(30) + '…')
+
+// 这一组是为「胶囊吃掉我后边打的字」加的：整条消息折成一枚卡片时，用户自己打的
+// 那些字必须还能看见。所以折之前得先认出「哪一段是粘进来的」。
+console.log('— 粘贴段的边界（pasteSplit）—')
+{
+  const body = new Array(22).fill('select b.project_name, a.xxx from t').join('\n')
+  const M = api.G.refBodies
+  const reset = (...pairs) => { M.clear(); for (const [k, v] of pairs) M.set(k, v) }
+
+  reset(['p1', body])
+  eq('⑰ 整条就是粘贴的', api.pasteSplit(body), { before: '', body: body, after: '' })
+
+  reset(['p1', body])
+  eq('⑱ 粘贴后边又打了一句', api.pasteSplit(body + '\n这段 SQL 帮我看下性能'),
+    { before: '', body: body, after: '\n这段 SQL 帮我看下性能' })
+
+  reset(['p1', body])
+  eq('⑲ 粘贴前边也打了字', api.pasteSplit('看看这个：\n' + body),
+    { before: '看看这个：\n', body: body, after: '' })
+
+  reset()
+  eq('⑳ 认不出（刷新过、没有正文表）→ null', api.pasteSplit(body), null)
+
+  reset(['q1', body])
+  eq('㉑ 只认粘贴进来的（p 键），引用正文不算', api.pasteSplit(body), null)
+
+  const short = '短短的粘贴'
+  reset(['p1', short], ['p2', body])
+  eq('㉒ 两段粘贴取最长的那段', api.pasteSplit(short + '\n中间\n' + body),
+    { before: short + '\n中间\n', body: body, after: '' })
+
+  reset(['p1', body.replace(/\n/g, '\r\n')])
+  eq('㉓ CRLF 归一后仍认得出', api.pasteSplit(body + '\n后面的话'),
+    { before: '', body: body, after: '\n后面的话' })
+
+  reset(['p1', body])
+  eq('㉔ 正文被宿主改过一个字 → 不猜', api.pasteSplit(body.replace('project_name', 'project_name ')), null)
+}
 
 console.log('')
 console.log(pass + ' passed, ' + fail + ' failed')

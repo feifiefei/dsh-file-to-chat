@@ -1682,7 +1682,7 @@ window.__ModuleLoader__.load({
      * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
      * 体检卡片要靠它才能分清「用户装的是哪一版」。
      */
-    var F2C_VERSION = '1.0.13'
+    var F2C_VERSION = '1.0.14'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，
@@ -3260,21 +3260,60 @@ window.__ModuleLoader__.load({
       return null
     }
 
-    function makeLongTextChip(host, raw) {
+    /**
+     * 在一条已发出的消息里，找出「当初粘贴进来的那一段」到底在哪。
+     *
+     * 为什么需要：输入框里的长文本已经折成胶囊了（五·C），胶囊提交时会展开成原文，
+     * 于是聊天里这条消息 = **粘贴的原文 + 用户接着打的字**。整条折成一枚卡片，
+     * 用户自己打的那些字就被盖在卡片底下看不见了 —— 这正是「胶囊又吃掉我的输入」。
+     * 所以只折**粘贴的那一段**，前后保留成普通文本。
+     *
+     * 认法：`G.refBodies` 里键以 `p` 开头的就是粘贴正文（见 foldPastedText），
+     * 在消息里做子串匹配，取**最长**的那段（同时粘了两段时，长的先折，短的留在字里）。
+     * 匹配不上（页面刷新过、正文被宿主归一过、或者压根不是粘贴的）就返回 null，
+     * 调用方**必须不折** —— 宁可铺满整屏，也不能猜错边界把用户的字藏起来。
+     *
+     * @returns {{before: string, body: string, after: string}|null}
+     */
+    function pasteSplit(text) {
+      var raw = String(text)
+      var lfRaw = raw.replace(/\r\n/g, '\n')
+      var best = null
+      G.refBodies.forEach(function (body, key) {
+        if (typeof body !== 'string' || body === '') return
+        if (key.charAt(0) !== 'p') return
+        var needle = body
+        var hay = raw
+        var at = hay.indexOf(needle)
+        if (at < 0) {
+          // 宿主可能把 CRLF 归一成 LF：两边都归一后再找一次（显示层只差不可见的 \r）。
+          needle = body.replace(/\r\n/g, '\n')
+          hay = lfRaw
+          at = hay.indexOf(needle)
+        }
+        if (at < 0) return
+        if (best === null || needle.length > best.body.length) {
+          best = { before: hay.slice(0, at), body: needle, after: hay.slice(at + needle.length) }
+        }
+      })
+      return best
+    }
+
+    function makeLongTextChip(host, parts) {
       var chip = document.createElement('span')
       chip.className = 'f2c-sent is-long'
       chip.setAttribute(FOLD_CHIP, '')
       chip.setAttribute('role', 'button')
       chip.setAttribute('tabindex', '0')
-      var preview = longTextPreview(raw)
-      var brief = longTextPreview(raw, 30)
+      var preview = longTextPreview(parts.body)
+      var brief = longTextPreview(parts.body, 30)
       chip.title = (preview === '' ? '' : preview + '\n\n') + '点击展开全文 · 再点一次收起'
       chip.appendChild(makeIcon())
       // 摘要跟着标题一起显示：折叠的意义是「一眼认出这段是什么」，只给行数做不到。
       // 太长就交给 CSS 的 ellipsis 截断，不要在这里硬切出半句话。
-      chip.appendChild(document.createTextNode(longTextLabel(raw) + (brief === '' ? '' : ' · ' + brief)))
+      chip.appendChild(document.createTextNode(longTextLabel(parts.body) + (brief === '' ? '' : ' · ' + brief)))
       var close = function () {
-        if (host.getAttribute(FOLD_DONE) === 'open') renderLongFold(host, raw)
+        if (host.getAttribute(FOLD_DONE) === 'open') renderLongFold(host, parts)
       }
       var toggle = function (e) {
         e.preventDefault()
@@ -3284,7 +3323,7 @@ window.__ModuleLoader__.load({
           close()
           return
         }
-        renderPlain(host, raw)
+        renderPlain(host, longRawOf(parts))
         armAutoClose(host, close)
       }
       chip.addEventListener('click', toggle)
@@ -3294,18 +3333,29 @@ window.__ModuleLoader__.load({
       return chip
     }
 
-    /** 把一段长文本换成卡片。与 renderFold 同样「先在离线片段里建好再替换」。 */
-    function renderLongFold(host, raw) {
+    /** 卡片对应的完整原文（粘贴段 + 用户自己打的字）。 */
+    function longRawOf(parts) {
+      return parts.before + parts.body + parts.after
+    }
+
+    /**
+     * 把消息里的粘贴段换成卡片，**前后的字照旧是字**。
+     *
+     * 与 renderFold 同样「先在离线片段里建好再替换」：中途抛异常就一个字都不动。
+     */
+    function renderLongFold(host, parts) {
       var frag = document.createDocumentFragment()
       try {
-        frag.appendChild(makeLongTextChip(host, raw))
+        if (parts.before !== '') frag.appendChild(document.createTextNode(parts.before))
+        frag.appendChild(makeLongTextChip(host, parts))
+        if (parts.after !== '') frag.appendChild(document.createTextNode(parts.after))
       } catch (err) {
         noteFoldError('renderLongFold 抛错：' + (err !== null && err !== undefined && err.message !== undefined ? err.message : err))
         return false
       }
       clearChildren(host)
       host.appendChild(frag)
-      host.setAttribute(FOLD_DONE, hashText(raw))
+      host.setAttribute(FOLD_DONE, hashText(longRawOf(parts)))
       return true
     }
 
@@ -3316,9 +3366,16 @@ window.__ModuleLoader__.load({
       // 用户亲手展开过就别再折回去 —— 他要看的就是全文。
       if (host.getAttribute(FOLD_DONE) === 'open') return false
       var raw = textOfRow(host)
-      if (!isLongText(raw)) return false
-      host.__f2cRaw = raw
-      if (!renderLongFold(host, raw)) return false
+      // 只折**粘贴进来的那一段**。认不出边界就不折 —— 整条折掉会把用户自己打的字
+      // 一起盖进卡片（1.0.12/1.0.13 的 bug：粘完再写一句，那一句当场消失）。
+      var parts = pasteSplit(raw)
+      if (parts === null) {
+        ROW_WHY.set(row, 'long: 认不出粘贴段')
+        return false
+      }
+      if (!isLongText(parts.body)) return false
+      host.__f2cRaw = longRawOf(parts)
+      if (!renderLongFold(host, parts)) return false
       FOLDED_ROWS.add(row)
       ROW_WHY.set(row, 'long folded')
       return true
