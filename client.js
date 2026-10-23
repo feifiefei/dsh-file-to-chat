@@ -1704,7 +1704,7 @@ window.__ModuleLoader__.load({
      * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
      * 体检卡片要靠它才能分清「用户装的是哪一版」。
      */
-    var F2C_VERSION = '1.0.15'
+    var F2C_VERSION = '1.0.16'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，
@@ -3250,20 +3250,29 @@ window.__ModuleLoader__.load({
     // 把对话本身挤没了。这里把「长得离谱的纯文本」折成一枚卡片：默认只显示行数与
     // 字数，点开还原全文。**只动显示、不动内容** —— 发给模型的一个字没少，复制按钮
     // 拿到的仍是全文，展开看到的就是当时粘进去的样子。
-    var LONG_TEXT_LINES = 12
+    // 超过 3 行就折（用户实测：4 行的报错栈在输入框里就开始「显得乱」）。
+    var LONG_TEXT_LINES = 3
     var LONG_TEXT_CHARS = 600
 
-    /** 这段文本算不算「长」：行数或字数任一超标即可。 */
+    /** 有效行数：末尾的空白不算行（`"a\nb\nc\n"` 是 3 行，不是 4 行）。 */
+    function lineCountOf(text) {
+      var s = String(text === null || text === undefined ? '' : text).replace(/\s+$/, '')
+      if (s === '') return 0
+      return s.split('\n').length
+    }
+
+    /** 这段文本算不算「长」：超过 3 行、或字数 ≥ 600，任一满足即可。 */
     function isLongText(text) {
       var s = String(text === null || text === undefined ? '' : text)
       if (s.length >= LONG_TEXT_CHARS) return true
-      return s.split('\n').length >= LONG_TEXT_LINES
+      return lineCountOf(s) > LONG_TEXT_LINES
     }
 
     /** 卡片标题：`长文本 · 24 行 · 1208 字`。 */
     function longTextLabel(text) {
       var s = String(text)
-      return '长文本 · ' + s.split('\n').length + ' 行 · ' + s.length + ' 字'
+      var n = lineCountOf(s)
+      return '长文本 · ' + (n === 0 ? 0 : n) + ' 行 · ' + s.length + ' 字'
     }
 
     /** 卡片上那一行摘要：第一个非空行，默认超过 60 字截断（tooltip 用 60，卡片上用 30）。 */

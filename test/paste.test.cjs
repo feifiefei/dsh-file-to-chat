@@ -25,6 +25,7 @@ const code = [
   'var PASTE_WHY = "-"',
   'var LAST_SCOPED = null',
   'var dbg = function () {}',
+  extract('function lineCountOf(text)'),
   extract('function isLongText(text)'),
   extract('function longTextLabel(text)'),
   extract('function longTextPreview(text, max)'),

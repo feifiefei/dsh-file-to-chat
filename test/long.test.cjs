@@ -1,7 +1,7 @@
 // 回归用例：长文本折叠的判定与文案（isLongText / longTextLabel / longTextPreview）。
 //
 // 这三支是纯函数，抠出来直接跑。判定边界都写进用例里：
-//   - 行数 ≥ 12 或 字数 ≥ 600 才算「长」；
+//   - 超过 3 行 或 字数 ≥ 600 才算「长」（末尾空白不算行）；
 //   - 标题里给出真实的「几行 / 几字」，模型与用户看的是同一组数；
 //   - 摘要取第一个非空行、超 60 字截断（tooltip 会用到）。
 //
@@ -31,6 +31,7 @@ const code = [
   'var G = { refBodies: new Map() }',
   'var LONG_TEXT_LINES = ' + numConst('LONG_TEXT_LINES'),
   'var LONG_TEXT_CHARS = ' + numConst('LONG_TEXT_CHARS'),
+  extract('function lineCountOf(text)'),
   extract('function isLongText(text)'),
   extract('function longTextLabel(text)'),
   extract('function longTextPreview(text, max)'),
@@ -53,12 +54,14 @@ console.log('— 判定 —')
 eq('① 短句不折', api.isLongText('帮我看下这个函数'), false)
 eq('② 空串不折', api.isLongText(''), false)
 eq('③ null 不折', api.isLongText(null), false)
-eq('④ 11 行仍不折', api.isLongText(line(11)), false)
-eq('⑤ 12 行开始折', api.isLongText(line(12)), true)
+eq('④ 3 行仍不折', api.isLongText(line(3)), false)
+eq('⑤ 4 行开始折', api.isLongText(line(4)), true)
 eq('⑥ 599 字不折', api.isLongText('字'.repeat(599)), false)
 eq('⑦ 600 字开始折', api.isLongText('字'.repeat(600)), true)
 eq('⑧ 单行超长也折（无换行）', api.isLongText('a'.repeat(900)), true)
-eq('⑨ 带 CRLF 的 12 行', api.isLongText(new Array(12).fill('x').join('\r\n')), true)
+eq('⑨ 带 CRLF 的 4 行', api.isLongText(new Array(4).fill('x').join('\r\n')), true)
+eq('⑨b 末尾换行不算多一行（3 行 + \\n 仍不折）', api.isLongText('a\nb\nc\n'), false)
+eq('⑨c 末尾空行不算多一行（4 行 + \\n\\n 仍折）', api.isLongText('a\nb\nc\nd\n\n'), true)
 
 console.log('— 标题 —')
 eq('⑩ 行数与字数都是真实的', api.longTextLabel('a\nb\nc'), '长文本 · 3 行 · 5 字')
