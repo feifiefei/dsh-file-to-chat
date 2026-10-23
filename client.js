@@ -1578,6 +1578,76 @@ window.__ModuleLoader__.load({
       return { via: 'conversation.input.setDraft', sessionId: sid }
     }
 
+    // ================================================================
+    // 五·C、输入框里的长文本：粘进来就折成胶囊
+    // ================================================================
+    // 聊天窗那套「长文本折成卡片」管不到输入框：粘一段几十行的东西进去，输入框立刻
+    // 撑到半屏、还得一路往下滚。这里在**粘贴那一刻**就把它换成一枚胶囊 —— 和引用
+    // 胶囊同一套机制，提交时由 codec.serialize 展开成**原样的那段文本**，不加引用
+    // 头、不加批注前缀，模型收到的与手打进去的一字不差。
+    //
+    // 顺序是刻意的：**先确认能插胶囊，再 preventDefault**。反过来的话，一旦
+    // insertReference 被拒，用户粘的东西就凭空消失了 —— 那是最不能容忍的失败。
+    var PASTE_STAT = { seen: 0, long: 0, folded: 0, passed: 0 }
+
+    /**
+     * 把一段长文本插成胶囊。**只做动作**：只跟 shell 打交道，不碰事件。
+     *
+     * @returns 是否真的插进去了。false 时调用方**必须**放行浏览器的默认粘贴 ——
+     *          宁可粘出一大段，也不能吞掉用户粘的东西。
+     */
+    function foldPastedText(shell, raw) {
+      var rev = null
+      var draft = ''
+      try {
+        var st = shell.state.getSnapshot()
+        rev = st.draftRev
+        draft = typeof st.draft === 'string' ? st.draft : ''
+      } catch (err) { return false }
+      if (typeof rev !== 'number') return false
+      var cs = null
+      try { cs = typeof shell.caretSpan === 'function' ? shell.caretSpan() : null } catch (err) { cs = null }
+      var at = draft.length
+      var start = cs !== null && cs !== undefined && typeof cs.start === 'number' ? cs.start : at
+      var end = cs !== null && cs !== undefined && typeof cs.end === 'number' ? cs.end : at
+      var n = ++G.refSeq
+      var ref = 'p' + n
+      var label = longTextLabel(raw)
+      var brief = longTextPreview(raw, 30)
+      if (brief !== '') label += ' · ' + brief
+      // 存的就是**原文**：胶囊提交时原样展开，不经过 composeBlock。
+      G.refBodies.set(ref, raw)
+      if (G.refBodies.size > 200) G.refBodies.delete(G.refBodies.keys().next().value)
+      var refInfo = { source: QUOTE_SOURCE, ref: ref, label: label, clipboardText: raw }
+      var applied = false
+      try {
+        applied = shell.insertReference(refInfo, { start: start, end: end, draftRev: rev }) === true
+      } catch (err) { applied = false }
+      if (!applied) {
+        G.refBodies.delete(ref)
+        G.refSeq--
+        return false
+      }
+      PASTE_STAT.folded++
+      dbg('粘贴的长文本已折成胶囊：' + label)
+      return true
+    }
+
+    /** 当前会话的 composer 句柄；拿不到返回 null（绝不抛）。 */
+    function composerShell(ctx) {
+      var sid = currentSessionId()
+      if (sid === '') return null
+      G.sessionId = sid
+      try {
+        var scoped = ctx.sessions.scope(sid)
+        if (scoped === null || scoped === undefined) return null
+        var shell = ctx.conversation.input.for(scoped)
+        if (shell === null || shell === undefined) return null
+        if (typeof shell.insertReference !== 'function') return null
+        return shell
+      } catch (err) { return null }
+    }
+
     /**
      * 胶囊插入后，把批注当**普通草稿文本**补在它右侧，同一行、不带任何前缀。
      *
@@ -1612,7 +1682,7 @@ window.__ModuleLoader__.load({
      * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
      * 体检卡片要靠它才能分清「用户装的是哪一版」。
      */
-    var F2C_VERSION = '1.0.12'
+    var F2C_VERSION = '1.0.13'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，
@@ -4008,6 +4078,8 @@ window.__ModuleLoader__.load({
           + ' 无换行=' + FOLD_STAT.noNl + ' 无容器=' + FOLD_STAT.noTarget
           + ' 调用=' + FOLD_STAT.calls + ' 折成=' + FOLD_STAT.folded + ' 长文=' + FOLD_STAT.long
           + ' 假=' + FOLD_STAT.falsy + ' 出错=' + FOLD_STAT.err)
+        out.push('[粘贴] 见过=' + PASTE_STAT.seen + ' 长文=' + PASTE_STAT.long
+          + ' 折成=' + PASTE_STAT.folded + ' 放行=' + PASTE_STAT.passed)
         if (FOLD_ERRS.length > 0) {
           out.push('[折叠错误]')
           for (var e = 0; e < FOLD_ERRS.length; e++) out.push('  ' + FOLD_ERRS[e])
@@ -5002,6 +5074,42 @@ window.__ModuleLoader__.load({
           mo.disconnect()
         }
       }, 'file-to-chat: fold sent quotes')
+
+      // 输入框里粘贴长文本 → 胶囊。挂在 document 的**捕获**阶段：Lexical 自己的
+      // 粘贴处理在更深的节点上（冒泡），我们先跑，preventDefault 才拦得住。
+      ctx.effect(function () {
+        var onPaste = function (e) {
+          try {
+            var t = e.target
+            if (t === null || t === undefined || typeof t.closest !== 'function') return
+            // 只认聊天输入框。DSH 的 composer 是 Lexical —— 文件搜索框、重命名
+            // 输入框同样可能是 contenteditable，一个字都别动。
+            if (t.closest('[data-lexical-editor="true"]') === null) return
+            var dt = e.clipboardData
+            if (dt === null || dt === undefined || typeof dt.getData !== 'function') return
+            var raw = dt.getData('text/plain') || ''
+            if (raw === '') return
+            PASTE_STAT.seen++
+            if (!isLongText(raw)) return
+            PASTE_STAT.long++
+            // 下面三道闸门任何一道不通，都**放行默认粘贴**（用户拿到的是纯文本，
+            // 只是没折叠）。绝不因为插件没准备好就吞掉粘贴。
+            wireQuoteSource(ctx)
+            if (!quoteSourceLive()) { PASTE_STAT.passed++; return }
+            var shell = composerShell(ctx)
+            if (shell === null) { PASTE_STAT.passed++; return }
+            if (!foldPastedText(shell, raw)) { PASTE_STAT.passed++; return }
+            e.preventDefault()
+            e.stopPropagation()
+          } catch (err) {
+            // 走到这里说明胶囊可能没插成 —— 那就让浏览器照常粘。
+            PASTE_STAT.passed++
+            console.warn('[file-to-chat] 粘贴折叠失败，按普通粘贴放行', err)
+          }
+        }
+        document.addEventListener('paste', onPaste, true)
+        return function () { document.removeEventListener('paste', onPaste, true) }
+      }, 'file-to-chat: fold long pasted text')
 
       dbg('已装载：划词批注浮层 + 已发送引用折叠')
     }
