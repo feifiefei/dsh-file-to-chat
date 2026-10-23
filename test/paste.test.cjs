@@ -22,12 +22,14 @@ const code = [
   'var G = { refBodies: new Map(), refSeq: 0 }',
   'var QUOTE_SOURCE = "file-to-chat-ref"',
   'var PASTE_STAT = { seen: 0, long: 0, folded: 0, passed: 0 }',
+  'var PASTE_WHY = "-"',
+  'var LAST_SCOPED = null',
   'var dbg = function () {}',
   extract('function isLongText(text)'),
   extract('function longTextLabel(text)'),
   extract('function longTextPreview(text, max)'),
   extract('function foldPastedText(shell, raw)'),
-  'return { foldPastedText: foldPastedText, G: G, STAT: PASTE_STAT }',
+  'return { foldPastedText: foldPastedText, G: G, STAT: PASTE_STAT, setScoped: function (s) { LAST_SCOPED = s } }',
 ].join('\n')
 
 const api = new Function(code)()
@@ -93,6 +95,28 @@ console.log('— 失败必须放行默认粘贴 —')
   ok('拿不到快照 → false', api.foldPastedText(sh3, long) === false)
   const sh4 = { state: { getSnapshot: function () { return { draft: 'x' } } }, insertReference: function () { return true } }
   ok('snapshot 没 draftRev → false', api.foldPastedText(sh4, long) === false)
+}
+
+console.log('— shell 拒绝时走事件通道兜底 —')
+{
+  const before = api.G.refBodies.size
+  const bailCalls = []
+  const scoped = { bail: function (self, name, payload) { bailCalls.push({ name: name, payload: payload }); return true } }
+  api.setScoped(scoped)
+  const sh = shellOf({ applied: false })
+  ok('bail 成功 → 整体算成功', api.foldPastedText(sh, long) === true)
+  ok('走的是 slash/input-insert-reference', bailCalls.length === 1 && bailCalls[0].name === 'slash/input-insert-reference', bailCalls)
+  ok('bail 拿到同一枚胶囊', bailCalls[0].payload.reference.ref === sh.calls[0].info.ref)
+  ok('bail 成功后正文留在表里', api.G.refBodies.get(bailCalls[0].payload.reference.ref) === long)
+
+  const turned = { bail: function () { return false } }
+  api.setScoped(turned)
+  const before2 = api.G.refBodies.size
+  ok('bail 也失败 → false（调用方放行默认粘贴）', api.foldPastedText(shellOf({ applied: false }), long) === false)
+  ok('两条路都失败时不留垃圾正文', api.G.refBodies.size === before2)
+  api.setScoped(null)
+  ok('没有 scoped 时仍然只看 shell', api.foldPastedText(shellOf({ applied: false }), long) === false)
+  ok('…也不留垃圾', api.G.refBodies.size === before2 && before2 >= before)
 }
 
 console.log('— 胶囊提交时展开成原文 —')

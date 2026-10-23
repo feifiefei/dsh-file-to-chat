@@ -2,6 +2,15 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。日期为 `YYYY-MM-DD`。
 
+## [1.0.15] — 2026-10-23
+
+### 修复
+
+- **输入框里粘长文本不折成胶囊**（1.0.13 的粘贴折叠，在真实环境里静默不生效）。三处原因一起修：
+  1. **拿不到会话 id**。`currentSessionId()` 以前只看 `bridge.sessionId`（右栏开着、座位组件渲染过才有）和 `G.sessionId`（插件加载那一刻记的缓存）。粘长文本时右栏往往是关的、加载时可能还没有会话 —— 两条都空，`composerShell()` 直接返回 null，于是「静默不折」。现在补上第三级 `G.readSessionId`（`apply` 里那个依次问 `uiSession` / `localStorage['dsh.sessions.current']` / `sessions.list` 的读取器）。
+  2. **`insertReference` 被 phase 拒绝**。粘贴发生在输入框**有焦点**的时刻，与「右键菜单插入」时的 phase 不同；`shell.insertReference` 只在 `plain/claimed` 且 `draftRev` 对得上时才动手。现在补上与 `injectText` 同款的**事件通道兜底** `scoped.bail(scoped, 'slash/input-insert-reference', { reference, span })`，仍失败才放行默认粘贴（绝不吞掉用户粘的东西）。
+  3. **失败时什么都不说**。体检卡片的 `[粘贴]` 行现在带 `最近=`（太短 / source 未就绪 / 拿不到会话 id / 拿不到 composer(原因) / 插入被拒(phase=… rev=…) / 折成）、`壳=`（composerShell 的具体失败点）、`会话id=有|空`。
+
 ## [1.0.14] — 2026-10-23
 
 ### 修复

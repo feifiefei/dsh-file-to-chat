@@ -1588,7 +1588,11 @@ window.__ModuleLoader__.load({
     //
     // 顺序是刻意的：**先确认能插胶囊，再 preventDefault**。反过来的话，一旦
     // insertReference 被拒，用户粘的东西就凭空消失了 —— 那是最不能容忍的失败。
-    var PASTE_STAT = { seen: 0, long: 0, folded: 0, passed: 0 }
+    var PASTE_STAT = { seen: 0, long: 0, folded: 0, passed: 0, last: '-' }
+    /** 最近一次插入被拒时看到的 phase/rev（诊断用）。 */
+    var PASTE_WHY = '-'
+    /** composerShell 最近一次拿到的 scoped 上下文（事件通道兜底要用）。 */
+    var LAST_SCOPED = null
 
     /**
      * 把一段长文本插成胶囊。**只做动作**：只跟 shell 打交道，不碰事件。
@@ -1623,7 +1627,20 @@ window.__ModuleLoader__.load({
       try {
         applied = shell.insertReference(refInfo, { start: start, end: end, draftRev: rev }) === true
       } catch (err) { applied = false }
+      // 与 injectText 同款兜底：shell 方法按 phase/rev 拒绝时，再走一次官方事件
+      // 通道。粘贴恰好在输入框**有焦点**时发生，phase 与「右键菜单插入」不同，
+      // 这条兜底就是为这种情况准备的。
+      if (!applied && LAST_SCOPED !== null && typeof LAST_SCOPED.bail === 'function') {
+        try {
+          applied = LAST_SCOPED.bail(LAST_SCOPED, 'slash/input-insert-reference',
+            { reference: refInfo, span: { start: start, end: end, draftRev: rev } }) === true
+        } catch (err) { applied = false }
+      }
       if (!applied) {
+        // 把拒绝原因抄给体检卡片 —— 否则用户只会看到「没折」，无从判断。
+        var why = '?'
+        try { why = shell.core.state.phase } catch (_) { why = '?' }
+        PASTE_WHY = 'phase=' + why + ' rev=' + (typeof shell.rev === 'number' ? shell.rev : '?') + '/' + rev
         G.refBodies.delete(ref)
         G.refSeq--
         return false
@@ -1633,19 +1650,24 @@ window.__ModuleLoader__.load({
       return true
     }
 
+    /** 最近一次 composerShell 为什么拿不到句柄（诊断用，'-' = 没试过/成功）。 */
+    var COMPOSER_WHY = '-'
+
     /** 当前会话的 composer 句柄；拿不到返回 null（绝不抛）。 */
     function composerShell(ctx) {
       var sid = currentSessionId()
-      if (sid === '') return null
+      if (sid === '') { COMPOSER_WHY = 'no-sid'; return null }
       G.sessionId = sid
       try {
         var scoped = ctx.sessions.scope(sid)
-        if (scoped === null || scoped === undefined) return null
+        if (scoped === null || scoped === undefined) { COMPOSER_WHY = 'scope-null'; return null }
         var shell = ctx.conversation.input.for(scoped)
-        if (shell === null || shell === undefined) return null
-        if (typeof shell.insertReference !== 'function') return null
+        if (shell === null || shell === undefined) { COMPOSER_WHY = 'shell-null'; return null }
+        if (typeof shell.insertReference !== 'function') { COMPOSER_WHY = 'no-insertReference'; return null }
+        LAST_SCOPED = scoped
+        COMPOSER_WHY = 'ok'
         return shell
-      } catch (err) { return null }
+      } catch (err) { COMPOSER_WHY = 'throw:' + String(err && err.message || err).slice(0, 60); return null }
     }
 
     /**
@@ -1682,7 +1704,7 @@ window.__ModuleLoader__.load({
      * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
      * 体检卡片要靠它才能分清「用户装的是哪一版」。
      */
-    var F2C_VERSION = '1.0.14'
+    var F2C_VERSION = '1.0.15'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，
@@ -2961,10 +2983,29 @@ window.__ModuleLoader__.load({
       return 'dsh-resource://file/session/' + encodeSegment(sessionId) + '/' + enc
     }
 
-    /** 当前会话 id：注入时记下的那个（bridge 在没开预览页时可能是空的）。 */
+    /**
+     * 当前会话 id。
+     *
+     * 三级来源，越靠前越「新鲜」：
+     *   1. bridge.sessionId —— 座位组件渲染时写进来的，只有右栏开着才更新；
+     *   2. G.readSessionId    —— apply 里那个会问 uiSession / localStorage /
+     *      sessions.list 的读取器。**必须有这一级**：粘贴发生时右栏往往没开，
+     *      前两级都拿不到 id，`composerShell` 就返回 null —— 表现就是
+     *      「输入框里粘长文本不折叠」，而且一点报错都没有（用户实测反馈）。
+     *   3. G.sessionId        —— 最近一次注入时记下的缓存。
+     */
     function currentSessionId() {
       if (bridge !== null && bridge.sessionId !== null && bridge.sessionId !== undefined && bridge.sessionId !== '') {
         return bridge.sessionId
+      }
+      if (typeof G.readSessionId === 'function') {
+        try {
+          var live = G.readSessionId()
+          if (typeof live === 'string' && live !== '') {
+            G.sessionId = live
+            return live
+          }
+        } catch (_) { /* 读取器偶尔会抛（会话正在切换）：落到缓存 */ }
       }
       return typeof G.sessionId === 'string' ? G.sessionId : ''
     }
@@ -4136,7 +4177,10 @@ window.__ModuleLoader__.load({
           + ' 调用=' + FOLD_STAT.calls + ' 折成=' + FOLD_STAT.folded + ' 长文=' + FOLD_STAT.long
           + ' 假=' + FOLD_STAT.falsy + ' 出错=' + FOLD_STAT.err)
         out.push('[粘贴] 见过=' + PASTE_STAT.seen + ' 长文=' + PASTE_STAT.long
-          + ' 折成=' + PASTE_STAT.folded + ' 放行=' + PASTE_STAT.passed)
+          + ' 折成=' + PASTE_STAT.folded + ' 放行=' + PASTE_STAT.passed
+          + ' 最近=' + PASTE_STAT.last
+          + ' 壳=' + COMPOSER_WHY
+          + ' 会话id=' + (currentSessionId() === '' ? '空' : '有'))
         if (FOLD_ERRS.length > 0) {
           out.push('[折叠错误]')
           for (var e = 0; e < FOLD_ERRS.length; e++) out.push('  ' + FOLD_ERRS[e])
@@ -5038,6 +5082,9 @@ window.__ModuleLoader__.load({
       // 当前这一代的 ctx。
       G.ctx = ctx
       var readCurrentSessionId = makeSessionIdReader(ctx)
+      // 让模块级函数也能拿到「活的」会话 id —— 粘贴折叠（输入框里粘长文本）就靠
+      // 这一句：那时右栏可能根本没开，bridge.sessionId 是空的。
+      G.readSessionId = readCurrentSessionId
       try {
         var sid0 = readCurrentSessionId()
         if (typeof sid0 === 'string' && sid0 !== '') G.sessionId = sid0
@@ -5147,15 +5194,21 @@ window.__ModuleLoader__.load({
             var raw = dt.getData('text/plain') || ''
             if (raw === '') return
             PASTE_STAT.seen++
-            if (!isLongText(raw)) return
+            PASTE_STAT.last = 'len=' + raw.length
+            if (!isLongText(raw)) { PASTE_STAT.last = '太短(len=' + raw.length + ')'; return }
             PASTE_STAT.long++
             // 下面三道闸门任何一道不通，都**放行默认粘贴**（用户拿到的是纯文本，
             // 只是没折叠）。绝不因为插件没准备好就吞掉粘贴。
             wireQuoteSource(ctx)
-            if (!quoteSourceLive()) { PASTE_STAT.passed++; return }
+            if (!quoteSourceLive()) { PASTE_STAT.passed++; PASTE_STAT.last = 'source 未就绪'; return }
             var shell = composerShell(ctx)
-            if (shell === null) { PASTE_STAT.passed++; return }
-            if (!foldPastedText(shell, raw)) { PASTE_STAT.passed++; return }
+            if (shell === null) {
+              PASTE_STAT.passed++
+              PASTE_STAT.last = currentSessionId() === '' ? '拿不到会话 id' : ('拿不到 composer(' + COMPOSER_WHY + ')')
+              return
+            }
+            if (!foldPastedText(shell, raw)) { PASTE_STAT.passed++; PASTE_STAT.last = '插入被拒(' + PASTE_WHY + ')'; return }
+            PASTE_STAT.last = '折成'
             e.preventDefault()
             e.stopPropagation()
           } catch (err) {
