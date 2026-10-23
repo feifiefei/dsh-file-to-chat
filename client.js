@@ -1142,6 +1142,9 @@ window.__ModuleLoader__.load({
       '  user-select: none; }',
       '.f2c-sent:hover { border-color: ' + tok('border4') + '; color: ' + tok('label') + '; }',
       '.f2c-sent:focus-visible { outline: 2px solid ' + tok('brand') + '; outline-offset: 1px; }',
+      // 长文本卡片：整段被折起来，只显示行数/字数。别给它加 max-width 以外的约束 ——
+      // 内容长度随时可能变，撑不开就省略号。
+      '.f2c-sent.is-long { color: ' + tok('label') + '; }',
 
       // 可跳回源码的胶囊：右侧常留 18px，悬停时在那儿浮出 ↗。
       // 留白是常驻的（不是 hover 才加）—— 否则鼠标一过胶囊就变宽、正文跟着重排。
@@ -1609,7 +1612,7 @@ window.__ModuleLoader__.load({
      * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
      * 体检卡片要靠它才能分清「用户装的是哪一版」。
      */
-    var F2C_VERSION = '1.0.11'
+    var F2C_VERSION = '1.0.12'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，
@@ -2484,7 +2487,7 @@ window.__ModuleLoader__.load({
      * 折叠的现场：这一轮扫了几行、卡在哪一步、折成几处、出过什么错。
      * 体检卡片把它抄出去 —— 「为什么这条消息没折成胶囊」光看截图判不出来。
      */
-    var FOLD_STAT = { rows: 0, noQuote: 0, noNl: 0, noTarget: 0, calls: 0, falsy: 0, folded: 0, err: 0 }
+    var FOLD_STAT = { rows: 0, noQuote: 0, noNl: 0, noTarget: 0, calls: 0, falsy: 0, folded: 0, long: 0, err: 0 }
     var FOLD_ERRS = []
     /** 每一行为什么没折：只给体检卡片看，正常人不会去读。 */
     var ROW_WHY = new WeakMap()
@@ -3131,6 +3134,126 @@ window.__ModuleLoader__.load({
       el.setAttribute(FOLD_DONE, 'open')
     }
 
+    // ---------------- 长文本折叠 ----------------
+    // 粘进来的一大段（会议记录、报错栈、别人甩过来的 Markdown）在气泡里铺满整屏，
+    // 把对话本身挤没了。这里把「长得离谱的纯文本」折成一枚卡片：默认只显示行数与
+    // 字数，点开还原全文。**只动显示、不动内容** —— 发给模型的一个字没少，复制按钮
+    // 拿到的仍是全文，展开看到的就是当时粘进去的样子。
+    var LONG_TEXT_LINES = 12
+    var LONG_TEXT_CHARS = 600
+
+    /** 这段文本算不算「长」：行数或字数任一超标即可。 */
+    function isLongText(text) {
+      var s = String(text === null || text === undefined ? '' : text)
+      if (s.length >= LONG_TEXT_CHARS) return true
+      return s.split('\n').length >= LONG_TEXT_LINES
+    }
+
+    /** 卡片标题：`长文本 · 24 行 · 1208 字`。 */
+    function longTextLabel(text) {
+      var s = String(text)
+      return '长文本 · ' + s.split('\n').length + ' 行 · ' + s.length + ' 字'
+    }
+
+    /** 卡片上那一行摘要：第一个非空行，默认超过 60 字截断（tooltip 用 60，卡片上用 30）。 */
+    function longTextPreview(text, max) {
+      var cap = typeof max === 'number' && max > 0 ? max : 60
+      var lines = String(text).split('\n')
+      for (var i = 0; i < lines.length; i++) {
+        var t = lines[i].trim()
+        if (t !== '') return t.length > cap ? t.slice(0, cap) + '…' : t
+      }
+      return ''
+    }
+
+    /**
+     * 这一行里真正装着正文的那个元素。
+     *
+     * 从行往下走：只要**有一个**子元素几乎独占整行的文本，就继续往下。宿主目前的
+     * 形态是 `flowItem > … > userRow > bubble > span[data-slot] > span._plainRun_`，
+     * 走到最里层那个没有子元素的 span 停下。找不到更深的容器（返回 null）就**不折** ——
+     * 认不出正文容器时宁可原样铺着，也不能把时间戳、按钮一起折进去。
+     */
+    function textHostOf(row) {
+      var el = row
+      for (var guard = 0; guard < 12; guard++) {
+        var total = (el.textContent || '').length
+        if (total === 0) return null
+        var next = null
+        for (var i = 0; i < el.children.length; i++) {
+          var c = el.children[i]
+          if ((c.textContent || '').length >= total * 0.9) { next = c; break }
+        }
+        if (next === null) return el === row ? null : el
+        el = next
+      }
+      return null
+    }
+
+    function makeLongTextChip(host, raw) {
+      var chip = document.createElement('span')
+      chip.className = 'f2c-sent is-long'
+      chip.setAttribute(FOLD_CHIP, '')
+      chip.setAttribute('role', 'button')
+      chip.setAttribute('tabindex', '0')
+      var preview = longTextPreview(raw)
+      var brief = longTextPreview(raw, 30)
+      chip.title = (preview === '' ? '' : preview + '\n\n') + '点击展开全文 · 再点一次收起'
+      chip.appendChild(makeIcon())
+      // 摘要跟着标题一起显示：折叠的意义是「一眼认出这段是什么」，只给行数做不到。
+      // 太长就交给 CSS 的 ellipsis 截断，不要在这里硬切出半句话。
+      chip.appendChild(document.createTextNode(longTextLabel(raw) + (brief === '' ? '' : ' · ' + brief)))
+      var close = function () {
+        if (host.getAttribute(FOLD_DONE) === 'open') renderLongFold(host, raw)
+      }
+      var toggle = function (e) {
+        e.preventDefault()
+        e.stopPropagation()
+        if (host.getAttribute(FOLD_DONE) === 'open') {
+          autoCloseNow()
+          close()
+          return
+        }
+        renderPlain(host, raw)
+        armAutoClose(host, close)
+      }
+      chip.addEventListener('click', toggle)
+      chip.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') toggle(e)
+      })
+      return chip
+    }
+
+    /** 把一段长文本换成卡片。与 renderFold 同样「先在离线片段里建好再替换」。 */
+    function renderLongFold(host, raw) {
+      var frag = document.createDocumentFragment()
+      try {
+        frag.appendChild(makeLongTextChip(host, raw))
+      } catch (err) {
+        noteFoldError('renderLongFold 抛错：' + (err !== null && err !== undefined && err.message !== undefined ? err.message : err))
+        return false
+      }
+      clearChildren(host)
+      host.appendChild(frag)
+      host.setAttribute(FOLD_DONE, hashText(raw))
+      return true
+    }
+
+    /** 这一行是不是该按「长文本」折；折了返回 true。 */
+    function tryLongFold(row) {
+      var host = textHostOf(row)
+      if (host === null) return false
+      // 用户亲手展开过就别再折回去 —— 他要看的就是全文。
+      if (host.getAttribute(FOLD_DONE) === 'open') return false
+      var raw = textOfRow(host)
+      if (!isLongText(raw)) return false
+      host.__f2cRaw = raw
+      if (!renderLongFold(host, raw)) return false
+      FOLDED_ROWS.add(row)
+      ROW_WHY.set(row, 'long folded')
+      return true
+    }
+
     /**
      * 取一个消息行「渲染出来的文本」。
      *
@@ -3188,9 +3311,14 @@ window.__ModuleLoader__.load({
           if (FOLDED_ROWS.has(row) && row.querySelector('[' + FOLD_CHIP + ']') !== null) {
             continue
           }
-          // ② 行级粗筛：整条气泡里一个 `> ` 行都没有就直接走人
+          // ② 行级粗筛：整条气泡里一个 `> ` 行都没有，就看看是不是「粘进来的长文本」
           var rowText = textOfRow(row)
           if (!/^\s*>\s?/m.test(rowText)) {
+            if (tryLongFold(row)) {
+              FOLD_STAT.long++
+              folded++
+              continue
+            }
             FOLD_STAT.noQuote++
             ROW_WHY.set(row, 'noquote text=' + JSON.stringify(String(rowText).slice(0, 40)))
             continue
@@ -3878,7 +4006,7 @@ window.__ModuleLoader__.load({
         }
         out.push('', '[折叠] 扫描=' + FOLD_STAT.rows + ' 无引用行=' + FOLD_STAT.noQuote
           + ' 无换行=' + FOLD_STAT.noNl + ' 无容器=' + FOLD_STAT.noTarget
-          + ' 调用=' + FOLD_STAT.calls + ' 折成=' + FOLD_STAT.folded
+          + ' 调用=' + FOLD_STAT.calls + ' 折成=' + FOLD_STAT.folded + ' 长文=' + FOLD_STAT.long
           + ' 假=' + FOLD_STAT.falsy + ' 出错=' + FOLD_STAT.err)
         if (FOLD_ERRS.length > 0) {
           out.push('[折叠错误]')
