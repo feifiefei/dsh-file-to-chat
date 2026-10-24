@@ -58,6 +58,9 @@ window.__ModuleLoader__.load({
     var Z_MENU = 1202
     var Z_NOTE = 1203
     var MAX_EXCERPT_LINES = 40
+    // 内联进引用块的字符上限。光靠行数挡不住「一整段没有换行的长回答」——一行
+    // 就能是几万字，而引用块是要发给模型的：既贵又淹掉批注本身。
+    var MAX_EXCERPT_CHARS = 1200
     var MAX_EXCERPT_ROWS = 60    // Excel 选区里最多渲染成表格的行数
 
     // ================================================================
@@ -385,6 +388,79 @@ window.__ModuleLoader__.load({
     }
 
     // ================================================================
+    // 二·五、对话行（聊天区）的选区
+    // ================================================================
+    // 聊天区的每一条消息都由 @deepseek-ai/dsh-client-ui-chat 渲染成一行
+    //   div[data-chat-flow-kind][data-chat-flow-key][data-chat-turn]
+    // kind 取 user / steering / assistant / assistant-step / turn-process …，
+    // turn 是这条消息属于第几轮（源码：`"data-chat-flow-kind": routedNode.kind`）。
+    // 用户要的是「对话内容也能批注」——所以选区不再只认右栏预览：在聊天里
+    // 划词，同样要能变成一条引用 + 批注发出去。
+    //
+    // 不引 turn-process / turn-trigger / turn-tail：那几行是工具调用的壳，
+    // 引用它们对模型没有意义，只会白占上下文。
+    var CHAT_ROW_SELECTOR = '[data-chat-flow-kind]'
+    var CHAT_FLASH_CLASS = 'f2c-flash'
+
+    /** kind → 给人看的角色名；不是可引用的行返回 ''。 */
+    function chatRoleOf(kind) {
+      var k = kind === null || kind === undefined ? '' : String(kind)
+      if (k === 'user') return '用户消息'
+      if (k === 'steering') return '用户插话'
+      if (k.indexOf('assistant') === 0) return '助手回答'
+      return ''
+    }
+
+    /** 选区/指针落在哪一条对话行里；不在聊天区返回 null。 */
+    function chatRowOf(node) {
+      var el = nodeToElement(node)
+      if (el === null || el.closest === undefined || el.closest === null) return null
+      return el.closest(CHAT_ROW_SELECTOR)
+    }
+
+    /** 对话行 → { role, flowKind, turn }；不可引用返回 null。 */
+    function chatTargetOf(row) {
+      if (row === null || row === undefined || row.getAttribute === undefined) return null
+      var kind = String(row.getAttribute('data-chat-flow-kind'))
+      var role = chatRoleOf(kind)
+      if (role === '') return null
+      var raw = Number(row.getAttribute('data-chat-turn'))
+      return {
+        role: role,
+        flowKind: kind,
+        turn: isFinite(raw) && raw >= 1 ? Math.floor(raw) : null,
+      }
+    }
+
+    /**
+     * 聊天区划词 → 快照（kind: 'chat'）。
+     *
+     * **不发行号**：聊天的「第几行」是排版折行，随窗口宽度变化，和文件行号
+     * 不是一回事。硬编一个数字发给模型只会误导它，所以这里只给「第几轮 + 角色」。
+     */
+    function captureChatSelection(range, text, row, first, last) {
+      var target = chatTargetOf(row)
+      if (target === null) return null
+      return {
+        kind: 'chat',
+        role: target.role,
+        turn: target.turn,
+        flowKind: target.flowKind,
+        text: text,
+        range: range,
+        path: null,
+        pathOnly: false,
+        lineRange: null,
+        pageRange: null,
+        spot: null,
+        top: first.top,
+        bottom: last.bottom,
+        left: Math.min(first.left, last.left),
+        right: Math.max(first.right, last.right),
+      }
+    }
+
+    // ================================================================
     // 三、选区快照
     // ================================================================
     /**
@@ -407,7 +483,9 @@ window.__ModuleLoader__.load({
       try { range = sel.getRangeAt(0) } catch (_) { return null }
       var startEl = nodeToElement(range.startContainer)
       if (startEl === null) return null
-      if (!isInDocumentPreview(startEl)) return null
+      // 两处可以批注：右栏的文件预览，和聊天区里的消息行。
+      var chatRow = chatRowOf(startEl)
+      if (chatRow === null && !isInDocumentPreview(startEl)) return null
       if (startEl.closest && startEl.closest('button, input, textarea, [contenteditable="true"]') !== null) return null
 
       // 多行选区用首/末行的矩形定位，比并集矩形准
@@ -428,6 +506,8 @@ window.__ModuleLoader__.load({
           last = r
         } catch (_) { return null }
       }
+
+      if (chatRow !== null) return captureChatSelection(range, text, chatRow, first, last)
 
       // 路径优先级：**宿主给的绝对路径** > 预览头部标签。
       //
@@ -1157,6 +1237,11 @@ window.__ModuleLoader__.load({
       '.f2c-sent.is-jump:hover .f2c-jump { display: inline-flex; }',
       '.f2c-sent .f2c-jump:hover { background: ' + hoverFill() + '; color: ' + tok('brand') + '; }',
 
+      // 「↗ 定位」到一条对话引用时，目标消息行闪一下。聊天区可能本来就在
+      // 那个位置，什么都不变的话用户会以为没跳。
+      '@keyframes f2c-flash { from { background: ' + tok('hover') + '; } to { background: transparent; } }',
+      '.f2c-flash { animation: f2c-flash 1.2s ease-out; }',
+
       // 折叠后**必须留着**的批注。刻意做成 inline 的裸文字，不加方框 ——
       // 目标是和输入框里「胶囊后面直接跟批注」的观感一致；加框会让聊天
       // 看起来比输入框重得多，那正是用户嫌「乱」的原因。
@@ -1704,7 +1789,7 @@ window.__ModuleLoader__.load({
      * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
      * 体检卡片要靠它才能分清「用户装的是哪一版」。
      */
-    var F2C_VERSION = '1.0.16'
+    var F2C_VERSION = '1.1.0'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，
@@ -1723,7 +1808,9 @@ window.__ModuleLoader__.load({
 
     function chipLabel(snap) {
       var short = ''
-      if (snap.kind === 'excel') {
+      if (snap.kind === 'chat') {
+        short = String(snap.role) + (snap.turn !== null && snap.turn !== undefined ? ' · 第' + snap.turn + '轮' : '')
+      } else if (snap.kind === 'excel') {
         var sheet = snap.sheet !== null && snap.sheet !== undefined && snap.sheet !== '' ? String(snap.sheet) + ' ' : ''
         short = sheet + String(snap.address !== undefined && snap.address !== null ? snap.address : '')
       } else if (snap.kind === 'file') {
@@ -2366,7 +2453,9 @@ window.__ModuleLoader__.load({
     // 六、引用块拼装
     // ================================================================
     function composeBlock(snap, note) {
-      var out = snap.kind === 'excel' ? composeTableBlock(snap) : composeTextBlock(snap)
+      var out = snap.kind === 'excel' ? composeTableBlock(snap)
+        : snap.kind === 'chat' ? composeChatBlock(snap)
+          : composeTextBlock(snap)
 
       var n = note === null || note === undefined ? '' : String(note).trim()
       if (n !== '') {
@@ -2390,6 +2479,40 @@ window.__ModuleLoader__.load({
       if (a <= 1 && b >= total) return '整份文件，共 ' + total + ' 行'
       if (a <= 1) return '第 1-' + b + ' 行（共 ' + total + ' 行）'
       return '第 ' + a + '-' + b + ' 行（共 ' + total + ' 行）'
+    }
+
+    /**
+     * 对话引用块。
+     *
+     * 首行是**自己的签名**（💬 引用对话），和文件的 📄 引用来源 并列但不同 ——
+     * 折叠器（splitQuoteRuns / describeQuote）靠这两个 emoji 分辨「这块是文件
+     * 引用还是对话引用」，后面的胶囊才显示得对。
+     */
+    function composeChatBlock(snap) {
+      var head = '> \uD83D\uDCAC 引用对话：' + String(snap.role)
+      if (snap.turn !== null && snap.turn !== undefined) head += '（第 ' + snap.turn + ' 轮）'
+      var out = [head]
+      var lines = String(snap.text).split('\n')
+      var cap = Math.min(lines.length, MAX_EXCERPT_LINES)
+      var budget = MAX_EXCERPT_CHARS
+      for (var i = 0; i < cap; i++) {
+        var line = lines[i]
+        if (budget <= 0) break
+        if (line.length > budget) {
+          // 卡在字符预算上：截断处补个省略号，别让人以为原文就到这儿。
+          out.push('> ' + line.slice(0, budget) + '…')
+          budget = 0
+          break
+        }
+        out.push('> ' + line)
+        budget -= line.length
+      }
+      var inlined = out.length - 1
+      if (inlined < lines.length) {
+        out.push('> …（选区共 ' + lines.length + ' 行 / ' + String(snap.text).length
+          + ' 字，仅内联前 ' + inlined + ' 行）')
+      }
+      return out
     }
 
     function composeTextBlock(snap) {
@@ -2575,6 +2698,17 @@ window.__ModuleLoader__.load({
     var FOLD_DONE = 'data-f2c-done'
     var FOLD_NOTE = 'data-f2c-note'
     var FOLDED_ROWS = new WeakSet()
+    /**
+     * 每一行「动过几次」。任何落在某一行里的 DOM 变更都会把它的计数 +1
+     * （见 `foldRowNear`）；全量扫描只重读**计数变过**的行（见 `foldSentQuotes` 的 ⓪c）。
+     *
+     * 为什么需要：判断「这行是不是引用块」必须看 `innerText`（`textContent` 丢换行，
+     * 见 `textOfRow`），而 innerText 要走样式解析与文本收集，比 textContent 贵一个量级。
+     * 流式回答期间，一批变更就排一次全量扫描（一秒钟几十次），可用户消息行几乎不动 ——
+     * 每次重算它们的 innerText 全是白烧。有了计数，没动过的行一轮只花一次
+     * WeakMap 读 + 一次属性比较。
+     */
+    var ROW_TOUCH = new WeakMap()
     /**
      * 折叠的现场：这一轮扫了几行、卡在哪一步、折成几处、出过什么错。
      * 体检卡片把它抄出去 —— 「为什么这条消息没折成胶囊」光看截图判不出来。
@@ -2772,7 +2906,7 @@ window.__ModuleLoader__.load({
     /** 引用块首行 → 给用户看的短标签，如 `📄 套餐对比.xlsx · 工作表 Sheet1 · 区域 B8`。 */
     function describeQuote(quoteText) {
       var first = String(quoteText).split('\n')[0].trim()
-      var m = /^\uD83D\uDCC4\s*引用来源[：:]\s*(.*)$/.exec(first)
+      var m = /^(?:\uD83D\uDCC4\s*引用来源|\uD83D\uDCAC\s*引用对话)[：:]\s*(.*)$/.exec(first)
       var tail = m !== null ? m[1].trim() : first
       // 末尾那对括号里是「第 N-M 行」或「工作表 X · 区域 B8」，长路径只留文件名
       var pm = /^(.*)（([^（）]*)）$/.exec(tail)
@@ -2795,7 +2929,9 @@ window.__ModuleLoader__.load({
       var buf = []
       var plain = []
 
-      var isSource = function (line) { return /^\s*>\s*\uD83D\uDCC4\s*引用来源[：:]/.test(line) }
+      var isSource = function (line) {
+        return /^\s*>\s*(?:\uD83D\uDCC4\s*引用来源|\uD83D\uDCAC\s*引用对话)[：:]/.test(line)
+      }
       var bodyOf = function (run) {
         return run.split('\n').map(function (l) { return l.replace(/^\s*>\s?/, '') }).join('\n').trim()
       }
@@ -3028,6 +3164,99 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 解析对话引用块的首行 → { role, turn }；不是对话引用返回 null。
+     * 形如：`> 💬 引用对话：助手回答（第 2 轮）`
+     */
+    function parseChatTarget(body) {
+      var text = String(body === null || body === undefined ? '' : body)
+      var first = text.indexOf('\n') < 0 ? text : text.slice(0, text.indexOf('\n'))
+      var m = /^\s*(?:\uD83D\uDCAC\s*)?引用对话[：:]\s*(.*)$/.exec(first)
+      if (m === null) return null
+      var rest = m[1].trim()
+      var tm = /第\s*(\d+)\s*轮/.exec(rest)
+      return {
+        role: rest.replace(/（.*$/, '').trim(),
+        turn: tm === null ? null : Number(tm[1]),
+      }
+    }
+
+    /**
+     * 在聊天区里找对话引用指向的那一行。
+     *
+     * 只按「第几轮」+「角色/kind」定位：消息 id 随会话变化，而轮次是用户看得懂、
+     * 也确实稳定的锚。优先级：kind 完全一致 > 角色一致 > 同轮第一行。
+     * （同一轮里可能有多条 assistant 行：正文和 assistant-step，只按角色会跳错。）
+     */
+    function findChatRow(target) {
+      if (target === null || target === undefined || target.turn === null) return null
+      var rows = document.querySelectorAll(CHAT_ROW_SELECTOR)
+      var fallback = null               // 这一轮里的第一行（kind 认不出来时兜底）
+      var byRole = null                 // 角色对得上（同轮可能有多条 assistant）
+      var byKind = null                 // kind 完全一致 —— 这才是「当初引用的那一条」
+      var visFallback = null            // 同上三档，但只在**看得见**的行里挑
+      var visByRole = null
+      var visByKind = null
+      for (var i = 0; i < rows.length; i++) {
+        var t = chatTargetOf(rows[i])
+        if (t === null || t.turn !== target.turn) continue
+        // 同一条消息可能在 DOM 里有两份（React 把非当前的 transcript 留在树上，
+        // 用 display:none 藏起来）。跳到一个藏起来的副本上是「点了没反应」，
+        // 所以看得见的副本优先；一个都没有时才退回隐藏的那份。
+        var shown = isRendered(rows[i])
+        if (fallback === null) fallback = rows[i]
+        if (shown && visFallback === null) visFallback = rows[i]
+        if (t.role === target.role) {
+          byRole = rows[i]
+          if (shown) visByRole = rows[i]
+        }
+        // 一轮里有 assistant 正文和 assistant-step 两步时，只按角色找会跳到
+        // 「过程」那条上；kind 精确匹配优先。
+        if (target.flowKind !== null && target.flowKind !== undefined
+          && t.flowKind === target.flowKind) {
+          byKind = rows[i]
+          if (shown) visByKind = rows[i]
+        }
+      }
+      if (visByKind !== null) return visByKind
+      if (visByRole !== null) return visByRole
+      if (visFallback !== null) return visFallback
+      if (byKind !== null) return byKind
+      return byRole !== null ? byRole : fallback
+    }
+
+    /** 这一行是不是真的挂在可见的布局里（隐藏的 transcript 副本不算）。 */
+    function isRendered(el) {
+      if (el === null || el === undefined) return false
+      if (typeof el.getClientRects !== 'function') return true    // 老引擎：当作可见
+      try {
+        return el.getClientRects().length > 0
+      } catch (err) {
+        return true
+      }
+    }
+
+    /** 滚到那一行并闪一下 —— 不闪的话，用户分不清是「没跳」还是「就在原地」。 */
+    function revealChatRow(row) {
+      try {
+        if (typeof row.scrollIntoView === 'function') {
+          row.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        }
+      } catch (_) { /* 老实现只认无参形式 */ }
+      try {
+        // 连着点两次时，上一次的定时器会提前把这一次的动画摘掉 —— 记住它再清掉。
+        if (row.__f2cFlashTimer) clearTimeout(row.__f2cFlashTimer)
+        row.classList.remove(CHAT_FLASH_CLASS)
+        // 强制重排，否则同一行连着点两次不会重放动画。
+        void row.offsetWidth
+        row.classList.add(CHAT_FLASH_CLASS)
+        row.__f2cFlashTimer = setTimeout(function () {
+          row.classList.remove(CHAT_FLASH_CLASS)
+          row.__f2cFlashTimer = null
+        }, 1400)
+      } catch (_) { /* 没有 classList 就算了，滚动本身已经生效 */ }
+    }
+
+    /**
      * 取右栏服务（可选依赖）。
      *
      * **绝不能用 `ctx.sidebarRight` 直接读**：cordis 对没写进 `exports.inject` 的
@@ -3054,8 +3283,15 @@ window.__ModuleLoader__.load({
       return svc !== null && svc !== undefined && typeof svc.openResource === 'function'
     }
 
-    /** 打开引用指向的文件（能定位行就定位行）。 */
+    /** 打开引用指向的文件（能定位行就定位行），或滚回被引用的那条对话。 */
     function openQuoteAt(body) {
+      var chat = parseChatTarget(body)
+      if (chat !== null) {
+        var row = findChatRow(chat)
+        if (row === null) return false
+        revealChatRow(row)
+        return true
+      }
       var target = parseQuoteTarget(body)
       if (target === null) return false
       if (!canJump()) return false
@@ -3102,7 +3338,10 @@ window.__ModuleLoader__.load({
       chip.setAttribute(FOLD_CHIP, '')
       chip.setAttribute('role', 'button')
       chip.setAttribute('tabindex', '0')
-      var jumpable = canJump() && parseQuoteTarget(body) !== null
+      var chatTarget = parseChatTarget(body)
+      var jumpable = chatTarget !== null
+        ? findChatRow(chatTarget) !== null
+        : (canJump() && parseQuoteTarget(body) !== null)
       // 标题只放前几行：整段正文的 tooltip 会盖住半屏，展开就能看到全文。
       var lines = String(body).split('\n')
       var hint = lines.slice(0, 3).join('\n') + (lines.length > 3 ? '\n…（共 ' + lines.length + ' 行）' : '')
@@ -3472,7 +3711,9 @@ window.__ModuleLoader__.load({
           //    但「没有文字」不等于「没有内容」—— 只发图片/附件的消息永远等不来
           //    文字，按老条件它就一直不揭膜，于是那条消息**一直是空的**（2026-10-21
           //    用户实测）。有可绘制的东西就揭。
-          if (hasPaintableContent(row)) markSeen(row)
+          //    已经揭过的行不再读 textContent —— 全量扫描一秒几十轮，这一句是
+          //    每行每轮都要付的账，而它只在第一次有意义。
+          if (row.getAttribute('data-f2c-seen') === null && hasPaintableContent(row)) markSeen(row)
           // ⓪b 自愈：这一行我们折过（带 done 标记），画面上却**一个字都没有** ——
           //    说明上一次折叠把内容清空了却没补回来（旧实现的异常路径，用户实测
           //    「发出去一片空白，复制按钮却有字」）。原文还在 __f2cRaw 里，直接
@@ -3483,6 +3724,12 @@ window.__ModuleLoader__.load({
             FOLDED_ROWS.delete(row)
             continue
           }
+          // ⓪c 这一行自上次扫描后**一个字节都没动** → 上次的结论照样成立，跳过。
+          //     全量扫描是按整表跑的，有了这一条，没动过的行一轮只花一次 WeakMap
+          //     读 + 一次属性比较，不再重算 innerText（见 ROW_TOUCH 的说明）。
+          var touched = ROW_TOUCH.get(row) || 0
+          if (row.__f2cScanVer === touched) continue
+          row.__f2cScanVer = touched
           // ① 折过、且 chip 仍在 → 跳过。省掉下面 textContent 这种要拷贝整段
           //    文本的操作 —— 流式回答期间这个函数每帧都可能被叫醒。
           if (FOLDED_ROWS.has(row) && row.querySelector('[' + FOLD_CHIP + ']') !== null) {
@@ -3567,6 +3814,8 @@ window.__ModuleLoader__.load({
           folded += did
         } catch (err) {
           noteFoldError(err)
+          // 这一轮没跑完，别让「已扫描」的标记把下次扫描也挡掉。
+          row.__f2cScanVer = -1
           console.warn('[file-to-chat] 折叠已发送引用块失败：', err)
         }
       }
@@ -3591,17 +3840,50 @@ window.__ModuleLoader__.load({
      * 不是 FOLD_SEL、子孙里也没有 FOLD_SEL —— 只按「新子树」判断会全部漏掉，
      * 只能等下一帧的 rAF 全量扫描，用户看到的就是「先显示全文、再快速折叠」。
      */
+    /**
+     * 从变更节点往上找最近的「可折叠的消息行」。
+     *
+     * 和 `el.closest(FOLD_SEL)` 结果一致，但**碰到最近的一条对话行就收手**：
+     * 流式回答期间绝大多数变更都落在助手行里，助手行不是 FOLD_SEL 的成员，
+     * closest() 会一路走到 <html> 才罢休；这个版本认出行那一层就返回 null。
+     *
+     * 返回 null 不代表「没有任何行」—— 可能是「最近的行不可折」，两者对调用方
+     * 是一回事（都不用折）。
+     */
+    function foldRowOf(node) {
+      var n = node
+      if (n === null || n === undefined) return null
+      if (n.nodeType === 3) n = n.parentElement              // 文本节点（characterData）
+      for (var guard = 0; n !== null && n !== undefined && guard < 40; guard++) {
+        if (n.nodeType === 1) {
+          if (n.matches !== undefined && n.matches(FOLD_SEL)) return n
+          // 最近的一条对话行不是可折的（助手回答/turn-process）→ 上面不可能再有
+          if (n.getAttribute !== undefined && n.getAttribute('data-chat-flow-kind') !== null) return null
+        }
+        n = n.parentElement
+      }
+      return null
+    }
+
+    /**
+     * @returns {boolean} 这次变更有没有落在（或带出）一条候选行上 ——
+     *                  观察者据此决定要不要排全量扫描，见 apply 里的说明。
+     */
     function foldRowNear(node) {
       var el = node
-      if (el === null || el === undefined) return
+      if (el === null || el === undefined) return false
       if (el.nodeType === 3) el = el.parentElement          // 文本节点（characterData）
-      if (el === null || el === undefined || el.nodeType !== 1) return
-      if (typeof el.closest !== 'function') return
+      if (el === null || el === undefined || el.nodeType !== 1) return false
+      if (typeof el.getAttribute !== 'function') return false
       try {
-        var row = el.matches !== undefined && el.matches(FOLD_SEL) ? el : el.closest(FOLD_SEL)
-        if (row !== null) noteSyncFold(foldSentQuotes(row))
+        var row = foldRowOf(el)
+        if (row === null) return false
+        ROW_TOUCH.set(row, (ROW_TOUCH.get(row) || 0) + 1)
+        noteSyncFold(foldSentQuotes(row))
+        return true
       } catch (err) {
         console.warn('[file-to-chat] 折叠增量扫描失败：', err)
+        return true          // 抛了也算「碰过」，让全量扫描兜底
       }
     }
 
@@ -3653,9 +3935,12 @@ window.__ModuleLoader__.load({
       if (list.length > 0) startRevealWatch()
     }
 
+    /**
+     * @returns {boolean} 这棵新子树里有没有候选行（观察者据此决定排不排全量扫描）。
+     */
     function foldIn(node) {
-      if (node === null || node.nodeType !== 1) return
-      if (typeof node.querySelector !== 'function') return
+      if (node === null || node.nodeType !== 1) return false
+      if (typeof node.querySelector !== 'function') return false
       // ① 这棵新子树自己就是目标行、或含有目标行 → 折它（覆盖面最大）
       var isRow = node.matches !== undefined && node.matches(FOLD_SEL)
       if (isRow || node.querySelector(FOLD_SEL) !== null) {
@@ -3665,10 +3950,10 @@ window.__ModuleLoader__.load({
         } catch (err) {
           console.warn('[file-to-chat] 折叠增量扫描失败：', err)
         }
-        return
+        return true
       }
       // ② 新节点落在某一行**内部** → 顺祖先找那一行（见 foldRowNear 的说明）
-      foldRowNear(node)
+      return foldRowNear(node)
     }
 
     // ================================================================
@@ -4541,8 +4826,10 @@ window.__ModuleLoader__.load({
         head.className = 'f2c-card-head'
         var src = document.createElement('span')
         src.className = 'f2c-src'
-        var label = snap.path !== null && snap.path !== undefined && snap.path !== ''
-          ? snap.path : '（未识别来源文件）'
+        var label = snap.kind === 'chat'
+          ? String(snap.role) + (snap.turn !== null && snap.turn !== undefined ? ' · 第 ' + snap.turn + ' 轮' : '') + '（对话内容）'
+          : (snap.path !== null && snap.path !== undefined && snap.path !== ''
+            ? snap.path : '（未识别来源文件）')
         if (snap.kind === 'excel') {
           var sheetLabel = snap.sheet !== null && snap.sheet !== undefined && snap.sheet !== ''
             ? snap.sheet : '?'
@@ -4629,9 +4916,11 @@ window.__ModuleLoader__.load({
 
         var note = document.createElement('textarea')
         note.className = 'f2c-note'
-        note.placeholder = snap.kind === 'file'
-          ? '写点什么…（可留空，只发送文件）'
-          : '写点什么…（可留空，只发送选区）'
+        note.placeholder = snap.kind === 'chat'
+          ? '写点什么…（可留空，只发送这段对话）'
+          : snap.kind === 'file'
+            ? '写点什么…（可留空，只发送文件）'
+            : '写点什么…（可留空，只发送选区）'
         // 卡片会因为「文件读完」而重画一次，草稿要跨重画留住。
         note.value = noteDraft
         note.addEventListener('input', function () { noteDraft = note.value })
@@ -4817,7 +5106,10 @@ window.__ModuleLoader__.load({
       function onPointerDown(e) {
         if (card !== null) return
         if (bar !== null && (e.target === bar || bar.contains(e.target))) return
-        if (!isInDocumentPreview(nodeToElement(e.target))) return
+        var el = nodeToElement(e.target)
+        // 聊天区里的消息行也要算「可选区」：否则在对话里拖选时，按钮会在
+        // 拖拽途中反复闪现（每次 selectionchange 都弹一次）。
+        if (!isInDocumentPreview(el) && chatRowOf(el) === null) return
         pointerSelecting = true
         if (bar !== null) clearBar()       // 别让上一轮的按钮挂在拖选途中
       }
@@ -5159,23 +5451,34 @@ window.__ModuleLoader__.load({
           micro = false
           scanOnce()
         }
+        // 微任务那一路是**有条件**的（见观察者里的 touched）：流式回答期间每个 token
+        // 都是一批变更，无条件排队就等于「每个 token 全量扫一遍聊天区」。而整表重扫
+        // 唯一能救的场景（React 把已有行的 chip 抹掉）同样是一次落在那一行里的变更，
+        // foldRowNear 一定命中 —— 它返回真才排微任务，保险一点不少。
+        var scheduleMic = function () {
+          if (!micro) { micro = true; queueMicrotask(scanMic) }
+        }
         var schedule = function () {
           if (raf === 0) raf = requestAnimationFrame(scan)
-          if (!micro) { micro = true; queueMicrotask(scanMic) }
+          scheduleMic()
         }
         var mo = new MutationObserver(function (records) {
           // 先把这一批变更**同步**折掉（见 foldIn 的说明：抢在绘制之前，这样
-          // 「发出去先弹一下全文」的闪动不会再发生），再排一次全量扫描兜底 ——
-          // React 重渲染可能把已有行的 chip 抹掉，那属于「没有新增节点」的变更，
-          // 只有全量扫描才看得到。
+          // 「发出去先弹一下全文」的闪动不会再发生），再按需要排全量扫描兜底。
+          var touched = false
           for (var i = 0; i < records.length; i++) {
             var added = records[i].addedNodes
-            for (var j = 0; j < added.length; j++) foldIn(added[j])
+            for (var j = 0; j < added.length; j++) {
+              if (foldIn(added[j])) touched = true
+            }
             // 变更**发生的位置**所在的行同样要折。React 重渲染一条消息时常常
             // 只替换行内的文本节点（不新增整行），光看 addedNodes 会漏掉。
-            foldRowNear(records[i].target)
+            if (foldRowNear(records[i].target)) touched = true
           }
-          schedule()
+          if (touched) scheduleMic()
+          // rAF 那一路无条件排（每帧最多一次，且没动过的行在 foldSentQuotes 里
+          // 被 ROW_TOUCH 直接跳过），它兜的是「不属于任何候选行的变更」。
+          if (raf === 0) raf = requestAnimationFrame(scan)
         })
         // characterData 也观察：React 更新文本时若直接改 nodeValue（而不是换节点），
         // 那就只有 characterData 记录能捕获到。代价是流式回答期间每来一个 token
