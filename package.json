@@ -1,6 +1,6 @@
 {
   "name": "dsh-file-to-chat",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Annotate a selection in the DeepSeek Harness right-sidebar document preview or in any message of the conversation — text, Excel cell ranges, Word/PDF pages — and send the quote plus your note into the current chat. Adds a right-click file tree menu (send content, send path, copy path, open with the default application) and folds sent quotes into a capsule in the transcript.",
   "type": "module",
   "main": "lib/index.js",
@@ -12,7 +12,7 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "test": "node test/meta.test.cjs && node test/fold.test.cjs && node test/table.test.cjs && node test/spot.test.cjs && node test/file.test.cjs && node test/jump.test.cjs && node test/long.test.cjs && node test/paste.test.cjs && node test/chat.test.cjs"
+    "test": "node test/meta.test.cjs && node test/fold.test.cjs && node test/table.test.cjs && node test/excel.test.cjs && node test/spot.test.cjs && node test/file.test.cjs && node test/jump.test.cjs && node test/long.test.cjs && node test/paste.test.cjs && node test/chat.test.cjs"
   },
   "files": [
     "lib",

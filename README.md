@@ -95,7 +95,7 @@
 
 ## 安装
 
-需要 **DSH Web 0.2.x**（开发与验证均在 `0.2.0-rc.2` 与 `0.2.1-rc.2` 上完成，两个版本均实测可用）。
+需要 **DSH Web 0.2.x**（开发与验证均在 `0.2.0-rc.2` 与 `0.2.1-rc.2` 上完成；`0.2.1-rc.3` 已按 1.1.1 自检修正并复验）。
 
 ### 方式一：从 Git 仓库装（推荐）
 
@@ -212,7 +212,7 @@ dsh-file-to-chat/
 回归用例不依赖浏览器：`client.js` 里的纯函数用花括号配平抠出来单独跑，
 
 ```bash
-npm test    # meta / fold / table / spot / file / jump 六组，全部断言 83 条
+npm test    # meta / fold / table / excel / spot / file / jump / long / paste / chat 十组全绿
 ```
 
 改动 `client.js` 里那些纯函数（选区解析、表头探测、折行切段、地址拼装、续发游标）之后跑一遍。**`F2C_VERSION` 必须与 `package.json` 的 `version` 同步** —— `test/meta.test.cjs` 会盯着。`jump.test.cjs` 里还有一条源码级守卫：**不许出现 `ctx.sidebarRight` 这种直接读取**（未写进 `exports.inject` 的服务会被 cordis 严格访问拦下、当场抛错），只能走 `ctx.get('sidebarRight')` —— 1.0.3~1.0.9 的「引用块折不起来」就是它。

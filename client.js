@@ -558,9 +558,17 @@ window.__ModuleLoader__.load({
     var MAX_CELLS = 3000         // 单元格总数上限，超出即拒绝取值
 
     // 工具栏 / 工作表标签 / 名称框 / 编辑栏 / 状态栏都点在「不是网格」的地方。
-    // 注意：这里只列 .fortune-* 的精确类名，不用 [class*="toolbar"] 这种模糊
-    // 匹配 —— 预览窗格自己的头部工具条也可能命中，那会把整个网格误排除。
+    // 注意：这里只列精确类名，不用 [class*="toolbar"] 这种模糊匹配 —— 预览窗格
+    // 自己的头部工具条也可能命中，那会把整个网格误排除。
+    //
+    // DSH 0.2.1 的 FortuneSheet 里编辑栏与标签条换成了 luckysheet-* 命名：
+    //   编辑栏  aside > div.fortune-fx-editor > div.fortune-fx-input  ← 可编辑文本
+    //   标签条  div.luckysheet-sheet-area > div.luckysheet-sheets-item
+    // 漏掉它们时点编辑栏会被当成点网格（workarea 正是它的祖先），批注按钮乱弹。
+    // .fortune-formula-box / .fortune-sheet-tab 在新版已不存在，留着只为兼容旧宿主。
     var FORTUNE_CHROME = '.fortune-toolbar, .fortune-sheet-list, .fortune-name-box,'
+      + ' .fortune-name-box-container, .fortune-fx-editor, .fortune-fx-input,'
+      + ' .fortune-sheettab-container, .luckysheet-sheet-area, .luckysheet-sheets-item,'
       + ' .fortune-formula-box, .fortune-stat-area, .fortune-sheet-tab,'
       + ' input, textarea, select, button'
 
@@ -645,12 +653,32 @@ window.__ModuleLoader__.load({
       return a === b ? a : a + ':' + b
     }
 
+    /**
+     * 当前活动工作表名。
+     *
+     * 新版 FortuneSheet 的标签条是 **workarea 的兄弟**（fortune-container 下
+     * 依次是 workarea / sheet-container / luckysheet-sheet-area），所以不能只在
+     * host 里找 —— host 通常就是 workarea。依次往「整个预览根」退，找到为止。
+     * 类名也从 fortune-sheet-list-item-* 换成了 luckysheet-sheets-item-*，
+     * 两套都试，旧宿主仍兼容。
+     */
     function activeSheetName(host) {
-      var el = host.querySelector('.fortune-sheet-list-item-active .fortune-sheet-list-item-name')
-        || host.querySelector('[class*="sheet-list-item-active"]')
-      if (el === null) return null
-      var t = (el.textContent || '').trim()
-      return t === '' ? null : t
+      if (host === null || host.querySelector === undefined) return null
+      var scopes = [host]
+      var box = host.closest === undefined ? null : host.closest('.fortune-container')
+      if (box !== null) scopes.push(box)
+      var root = previewRootOf(host)
+      if (root !== null && root !== host) scopes.push(root)
+      var sel = '.luckysheet-sheets-item-active .luckysheet-sheets-item-name,'
+        + ' .fortune-sheet-list-item-active .fortune-sheet-list-item-name,'
+        + ' [class*="sheets-item-active"] [class*="item-name"]'
+      for (var i = 0; i < scopes.length; i++) {
+        var el = scopes[i].querySelector(sel)
+        if (el === null) continue
+        var t = (el.textContent || '').trim()
+        if (t !== '') return t
+      }
+      return null
     }
 
     // ---- 直接向 FortuneSheet 要「真实选区」 ----
@@ -1789,7 +1817,7 @@ window.__ModuleLoader__.load({
      * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
      * 体检卡片要靠它才能分清「用户装的是哪一版」。
      */
-    var F2C_VERSION = '1.1.0'
+    var F2C_VERSION = '1.1.1'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，

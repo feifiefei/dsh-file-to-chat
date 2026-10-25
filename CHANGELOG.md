@@ -2,6 +2,20 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。日期为 `YYYY-MM-DD`。
 
+## [1.1.1] — 2026-10-25
+
+适配 DSH 0.2.1-rc.3 的 Excel 预览自检结果。两个 bug 都出在 FortuneSheet 的内部类名上 ——
+这类东西不属于宿主对外契约，升级时改名不会报错，只会让功能静默降级。
+
+### 修复
+
+- **Excel 选区拿不到工作表名**。旧代码在 `.fortune-sheet-list-item-active .fortune-sheet-list-item-name` 里找活动表名，而 0.2.1 的标签条改叫 `.luckysheet-sheets-item-active` / `.luckysheet-sheets-item-name`（旧类名在产物里已经 **0 次**出现），于是这条路径恒返回 `null`，引用块丢成「工作表 · 区域 B3:D7」。现在两套类名并列，并依次在 host → `.fortune-container` → 整个预览根里找 —— 新版把标签条放成了 `.fortune-workarea` 的**兄弟**，只查 host 永远够不到。
+- **点 Excel 编辑栏会误弹「批注」按钮**。0.2.1 的编辑栏是 `div.fortune-fx-editor > div.fortune-fx-input[contenteditable]`，标签条是 `div.luckysheet-sheet-area > div.luckysheet-sheets-item`，都不在旧的排除表里；编辑栏又在 `.fortune-workarea` 内部，于是一点就被当成「点在网格上」。已补进 `FORTUNE_CHROME`（旧宿主已不存在的 `.fortune-formula-box` / `.fortune-sheet-tab` 留着兼容）。
+
+### 测试
+
+- 新增 `test/excel.test.cjs`（28 例）：用假 DOM 复刻 0.2.1 的 FortuneSheet 结构（workarea / sheet-container / 标签条三者是兄弟），覆盖网格命中、编辑栏与标签条排除、表名三层回退、旧世代类名兼容、列号换算与区域地址解析。把这套用例跑在 1.1.0 的 `client.js` 上会红 6 例 —— 正是上面两个 bug。
+
 ## [1.1.0] — 2026-10-24
 
 ### 新增
