@@ -1781,19 +1781,37 @@ window.__ModuleLoader__.load({
 
     /** 当前会话的 composer 句柄；拿不到返回 null（绝不抛）。 */
     function composerShell(ctx) {
-      var sid = currentSessionId()
-      if (sid === '') { COMPOSER_WHY = 'no-sid'; return null }
-      G.sessionId = sid
-      try {
-        var scoped = ctx.sessions.scope(sid)
-        if (scoped === null || scoped === undefined) { COMPOSER_WHY = 'scope-null'; return null }
-        var shell = ctx.conversation.input.for(scoped)
-        if (shell === null || shell === undefined) { COMPOSER_WHY = 'shell-null'; return null }
-        if (typeof shell.insertReference !== 'function') { COMPOSER_WHY = 'no-insertReference'; return null }
-        LAST_SCOPED = scoped
-        COMPOSER_WHY = 'ok'
-        return shell
-      } catch (err) { COMPOSER_WHY = 'throw:' + String(err && err.message || err).slice(0, 60); return null }
+      var ids = sessionCandidates()
+      if (ids.length === 0) { COMPOSER_WHY = 'no-sid'; return null }
+      var bad = ''
+      for (var i = 0; i < ids.length; i++) {
+        var sid = ids[i]
+        var scoped = null
+        try {
+          scoped = ctx.sessions.scope(sid)
+        } catch (err) {
+          COMPOSER_WHY = 'throw:' + String(err && err.message || err).slice(0, 60)
+          continue
+        }
+        if (scoped === null || scoped === undefined) {
+          // 拿这个 id 取不到会话：多半是过期的座位桥，换下一个候选。
+          bad += (bad === '' ? '' : ',') + sid.slice(0, 8)
+          continue
+        }
+        try {
+          var shell = ctx.conversation.input.for(scoped)
+          if (shell === null || shell === undefined) { COMPOSER_WHY = 'shell-null'; return null }
+          if (typeof shell.insertReference !== 'function') { COMPOSER_WHY = 'no-insertReference'; return null }
+          G.sessionId = sid
+          LAST_SCOPED = scoped
+          COMPOSER_WHY = 'ok'
+          return shell
+        } catch (err) {
+          COMPOSER_WHY = 'throw:' + String(err && err.message || err).slice(0, 60)
+        }
+      }
+      COMPOSER_WHY = bad === '' ? 'scope-null' : ('scope-null(' + bad + ')')
+      return null
     }
 
     /**
@@ -1852,7 +1870,7 @@ window.__ModuleLoader__.load({
      * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
      * 体检卡片要靠它才能分清「用户装的是哪一版」。
      */
-    var F2C_VERSION = '1.1.2'
+    var F2C_VERSION = '1.1.3'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，
@@ -3194,9 +3212,9 @@ window.__ModuleLoader__.load({
      *   3. G.sessionId        —— 最近一次注入时记下的缓存。
      */
     function currentSessionId() {
-      if (bridge !== null && bridge.sessionId !== null && bridge.sessionId !== undefined && bridge.sessionId !== '') {
-        return bridge.sessionId
-      }
+      // 活的读取器优先：它问的是 uiSession 当前的会话绑定，永远跟着屏幕上的
+      // 那个聊天走。`bridge.sessionId` 排第二 —— 右栏一关它就冻在上一个会话上，
+      // 只在读取器失灵时才用。
       if (typeof G.readSessionId === 'function') {
         try {
           var live = G.readSessionId()
@@ -3204,9 +3222,35 @@ window.__ModuleLoader__.load({
             G.sessionId = live
             return live
           }
-        } catch (_) { /* 读取器偶尔会抛（会话正在切换）：落到缓存 */ }
+        } catch (_) { /* 读取器偶尔会抛（会话正在切换）：落到下一级 */ }
+      }
+      if (bridge !== null && bridge !== undefined && bridge.sessionId !== null && bridge.sessionId !== undefined && bridge.sessionId !== '') {
+        return bridge.sessionId
       }
       return typeof G.sessionId === 'string' ? G.sessionId : ''
+    }
+
+    /**
+     * 「这可能是当前会话」的候选 id，按**新鲜度**排好。
+     *
+     * 为什么要有多个：`bridge.sessionId` 是右栏座位渲染时写进来的，右栏一关它
+     * **不会自己变空** —— 会一直停在上一个会话的 id 上。把它当唯一来源，粘贴折叠
+     * 就会拿着过期 id 去 `sessions.scope()`，拿回 undefined，然后静默放行。
+     * 2026-10-28 的 `拿不到 composer(scope-null)` 就是这么来的。
+     *
+     * 所以顺序是：活的读取器（uiSession 绑定当前会话）→ 座位桥 → 上次缓存。
+     * 真伪由 `composerShell` 用 `sessions.scope()` 逐个验证 —— 只有能取出会话的
+     * 那个才算数，猜错也不会用错。
+     */
+    function sessionCandidates() {
+      var out = []
+      var add = function (id) {
+        if (typeof id === 'string' && id !== '' && out.indexOf(id) < 0) out.push(id)
+      }
+      try { if (typeof G.readSessionId === 'function') add(G.readSessionId()) } catch (_) { /* 会话正在切换 */ }
+      try { add(bridge !== null && bridge !== undefined ? bridge.sessionId : '') } catch (_) { /* 桥还没建 */ }
+      add(G.sessionId)
+      return out
     }
 
     /** 从折叠后的引用正文里抠出「打开哪个文件的第几行」。 */

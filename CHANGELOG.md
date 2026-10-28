@@ -2,6 +2,27 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。日期为 `YYYY-MM-DD`。
 
+## [1.1.3] — 2026-10-28
+
+1.1.2 的浮条立刻派上了用场：用户粘长文本时它报
+`v1.1.2 · 长文本没折：拿不到 composer(scope-null)`。会话 id **有值**，只是**过期**的。
+
+### 修复
+
+- **粘贴折叠拿着过期的会话 id 去找 composer，失败后静默放行**。来源链是
+  `bridge.sessionId` → `G.readSessionId` → `G.sessionId`，而第一个是右栏座位组件渲染时
+  写进来的 —— 右栏一关它**不会变空**，会一直冻在上一个会话上。`sessions.scope(过期 id)`
+  返回 `undefined`，于是「拿不到 composer」。
+  现在改成**候选列表**：活读取器（uiSession 当前绑定）→ 座位桥 → 上次缓存，逐个用
+  `sessions.scope()` 验证，能取出会话的那个才算数；全都取不到时，诊断里会写下试过哪些
+  id 的前 8 位（`scope-null(1a2b3c4d,9e8f7a6b)`）。`currentSessionId()` 也把活的读取器
+  提到了最前面。
+
+### 测试
+
+- 新增 `test/session.test.cjs`（22 例）：候选顺序与去重、过期 id 自动跳过、全部取不到时
+  原因可读、`scope()` 抛错不影响后续候选、缺少 `insertReference` 时给出准确原因。
+
 ## [1.1.2] — 2026-10-28
 
 让「粘进去没折」这件事**自己说出来**。1.0.13 起输入框里粘长文本会折成胶囊，但它有
