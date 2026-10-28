@@ -1254,6 +1254,19 @@ window.__ModuleLoader__.load({
       // 内容长度随时可能变，撑不开就省略号。
       '.f2c-sent.is-long { color: ' + tok('label') + '; }',
 
+      // 长文本粘贴**没折成**时的浮条。只在功能失效的那一刻出现，是给用户的
+      // 证据（也顺手带上版本号：分不清「新代码没生效」还是「新代码拒绝执行」
+      // 时，这一行就是判据）。
+      '.f2c-toast { position: fixed; left: 50%; bottom: 96px;',
+      '  transform: translateX(-50%); z-index: ' + Z_MENU + ';',
+      '  max-width: 70vw; padding: 6px 12px; border-radius: 999px;',
+      '  background: ' + tok('layer1') + '; color: ' + tok('label1') + ';',
+      '  border: 0.5px solid ' + tok('border2') + ';',
+      '  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28);',
+      '  font-size: 12px; line-height: 18px;',
+      '  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;',
+      '  pointer-events: none; user-select: none; }',
+
       // 可跳回源码的胶囊：右侧常留 18px，悬停时在那儿浮出 ↗。
       // 留白是常驻的（不是 hover 才加）—— 否则鼠标一过胶囊就变宽、正文跟着重排。
       '.f2c-sent.is-jump { position: relative; padding-right: 20px; }',
@@ -1784,6 +1797,28 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 长文本粘贴**没折成**时，在屏幕下方浮一条 3 秒后自动消失的提示。
+     *
+     * 为什么要有它：折叠失败时我们一律放行默认粘贴，用户看到的就是「粘进来了，
+     * 但没折」—— 和「插件根本没加载」长得一模一样。2026-10-23 和 10-28 两次
+     * 排查都卡在这里，只能靠用户手动打开体检卡片贴文本。带上版本号，于是这一
+     * 条浮条同时回答两个问题：**新代码生效了吗**（版本对不对）、**卡在哪道闸门**。
+     */
+    var pasteToastAt = 0
+    function pasteToast(text) {
+      try {
+        var now = Date.now()
+        if (now - pasteToastAt < 1200) return
+        pasteToastAt = now
+        var d = document.createElement('div')
+        d.className = 'f2c-toast'
+        d.textContent = 'v' + F2C_VERSION + ' · ' + text
+        document.body.appendChild(d)
+        setTimeout(function () { try { d.remove() } catch (e) {} }, 3400)
+      } catch (e) {}
+    }
+
+    /**
      * 胶囊插入后，把批注当**普通草稿文本**补在它右侧，同一行、不带任何前缀。
      *
      * 依据 `$replaceDetectSpanWithNodes` 的明文契约：「The caret lands after the
@@ -1817,7 +1852,7 @@ window.__ModuleLoader__.load({
      * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
      * 体检卡片要靠它才能分清「用户装的是哪一版」。
      */
-    var F2C_VERSION = '1.1.1'
+    var F2C_VERSION = '1.1.2'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，
@@ -4498,7 +4533,7 @@ window.__ModuleLoader__.load({
           + ' 无换行=' + FOLD_STAT.noNl + ' 无容器=' + FOLD_STAT.noTarget
           + ' 调用=' + FOLD_STAT.calls + ' 折成=' + FOLD_STAT.folded + ' 长文=' + FOLD_STAT.long
           + ' 假=' + FOLD_STAT.falsy + ' 出错=' + FOLD_STAT.err)
-        out.push('[粘贴] 见过=' + PASTE_STAT.seen + ' 长文=' + PASTE_STAT.long
+        out.push('[粘贴] 版本=' + F2C_VERSION + ' 见过=' + PASTE_STAT.seen + ' 长文=' + PASTE_STAT.long
           + ' 折成=' + PASTE_STAT.folded + ' 放行=' + PASTE_STAT.passed
           + ' 最近=' + PASTE_STAT.last
           + ' 壳=' + COMPOSER_WHY
@@ -5410,6 +5445,9 @@ window.__ModuleLoader__.load({
       // 折叠那套 observer 挂在 document.body 上、跨 HMR 世代复用，读的必须是
       // 当前这一代的 ctx。
       G.ctx = ctx
+      // 控制台里敲 `__dshFileToChat.version` 就能确认「页面里跑的是哪一版」。
+      // 排查「新代码没生效」还是「新代码拒绝执行」时，这是最快的一刀。
+      G.version = F2C_VERSION
       var readCurrentSessionId = makeSessionIdReader(ctx)
       // 让模块级函数也能拿到「活的」会话 id —— 粘贴折叠（输入框里粘长文本）就靠
       // 这一句：那时右栏可能根本没开，bridge.sessionId 是空的。
@@ -5540,20 +5578,33 @@ window.__ModuleLoader__.load({
             // 下面三道闸门任何一道不通，都**放行默认粘贴**（用户拿到的是纯文本，
             // 只是没折叠）。绝不因为插件没准备好就吞掉粘贴。
             wireQuoteSource(ctx)
-            if (!quoteSourceLive()) { PASTE_STAT.passed++; PASTE_STAT.last = 'source 未就绪'; return }
+            if (!quoteSourceLive()) {
+              PASTE_STAT.passed++
+              PASTE_STAT.last = 'source 未就绪'
+              pasteToast('长文本没折：引用服务没就绪')
+              return
+            }
             var shell = composerShell(ctx)
             if (shell === null) {
               PASTE_STAT.passed++
               PASTE_STAT.last = currentSessionId() === '' ? '拿不到会话 id' : ('拿不到 composer(' + COMPOSER_WHY + ')')
+              pasteToast('长文本没折：' + PASTE_STAT.last)
               return
             }
-            if (!foldPastedText(shell, raw)) { PASTE_STAT.passed++; PASTE_STAT.last = '插入被拒(' + PASTE_WHY + ')'; return }
+            if (!foldPastedText(shell, raw)) {
+              PASTE_STAT.passed++
+              PASTE_STAT.last = '插入被拒(' + PASTE_WHY + ')'
+              pasteToast('长文本没折：插入被拒 ' + PASTE_WHY)
+              return
+            }
             PASTE_STAT.last = '折成'
             e.preventDefault()
             e.stopPropagation()
           } catch (err) {
             // 走到这里说明胶囊可能没插成 —— 那就让浏览器照常粘。
             PASTE_STAT.passed++
+            PASTE_STAT.last = '异常:' + String(err && err.message || err).slice(0, 80)
+            pasteToast('长文本没折：' + PASTE_STAT.last)
             console.warn('[file-to-chat] 粘贴折叠失败，按普通粘贴放行', err)
           }
         }
