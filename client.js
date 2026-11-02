@@ -1546,23 +1546,47 @@ window.__ModuleLoader__.load({
      *                「空行 + 批注：」这个分隔前缀，所以输入框里是「[胶囊] 内容」
      *                同一行、无「批注」二字，而发出去的正文格式完全不变。
      */
+    /** 最近一次「把引用送进聊天」的结果 —— 这类静默失败是插件最容易踩的坑。 */
+    var INJECT_STAT = { n: 0, last: '-' }
+
+    /** 记一次成功的注入（`via` 写进体检卡片，用来分辨走的哪条路）。 */
+    function noteInjectOk(r, sid) {
+      INJECT_STAT.n++
+      INJECT_STAT.last = String(r.via)
+        + ' · 会话 ' + (typeof sid === 'string' && sid !== '' ? sid.slice(0, 8) : '?')
+        + (r.noteInline === true ? ' · 批注在后' : (r.noteInline === false ? ' · 批注并入正文' : ''))
+      return r
+    }
+
+    /** 记一次失败的注入。必须同时让用户看见 —— 否则就是「按了发送，什么都没发生」。 */
+    function noteInjectFail(why) {
+      INJECT_STAT.last = '失败：' + why
+      pasteToast('引用没插进去：' + why)
+    }
+
     function injectText(ctx, readSessionId, text, label, note) {
-      var sid = bridge.sessionId
-      if (sid === undefined || sid === null || sid === '') sid = readSessionId()
+      // 会话 id 必须**验证过**再用（1.1.3 的教训）。
+      // 以前这里先取 `bridge.sessionId`：右栏一关它就冻在上一个会话上，拿它去
+      // `sessions.scope()` 只会得到 undefined —— 于是 ① 被跳过、② 没有座位桥
+      // （座位组件没渲染，`bridge.inputActions` 是空的）、③ 又拿同一个过期 id
+      // 抛「会话 scope 不可用」。表现就是：在聊天里划词点「批注」→ 按 Enter →
+      // 输入框空着、聊天里也没有东西（右栏没开时必现，用户实测反馈）。
+      var pick = resolveScoped(ctx, readSessionId)
+      var sid = pick.id
+      var scoped = pick.scoped
       // 记下来：聊天里胶囊的「打开并定位」要用它拼 dsh-resource:// 地址。
-      if (sid !== undefined && sid !== null && sid !== '') G.sessionId = sid
+      if (sid !== '') G.sessionId = sid
       var noteBody = note === null || note === undefined ? '' : String(note).trim()
       // 纯文本路径（②③）没法把批注和引用拆开显示，直接把两者拼成完整正文。
       var full = noteBody === '' ? text : text + '\n\n批注：' + noteBody
 
       // ① 首选：插成 composer 里的引用 chip
-      if (sid !== undefined && sid !== null && sid !== '') {
+      if (scoped !== null) {
         try {
           wireQuoteSource(ctx)
           if (quoteSourceLive()) {
-            var scoped = ctx.sessions.scope(sid)
-            var shell = scoped !== undefined && scoped !== null
-              ? ctx.conversation.input.for(scoped) : null
+            var shell = null
+            try { shell = ctx.conversation.input.for(scoped) } catch (_) { shell = null }
             if (shell !== null && shell !== undefined && typeof shell.insertReference === 'function') {
               var st = shell.state.getSnapshot()
               var at = typeof st.draft === 'string' ? st.draft.length : 0
@@ -1640,10 +1664,10 @@ window.__ModuleLoader__.load({
                 // 直接在这里开膜，不依赖任何关于占位符码位的假设 —— 这是最可靠
                 // 的触发点。
                 sealOn()
-                return {
+                return noteInjectOk({
                   via: 'insertReference(chip)', sessionId: sid, ref: ref,
                   label: text2, noteInline: noteInline,
-                }
+                }, sid)
               }
               // 被拒时把守卫现场打出来：insertReference 只在 phase 为
               // plain/claimed 且 span.draftRev === shell.rev 时才动手。
@@ -1682,26 +1706,32 @@ window.__ModuleLoader__.load({
             var appended = false
             try { appended = ia.insertText('\n' + full, sp2) !== false } catch (_) { appended = false }
             if (appended) {
-              return { via: 'inputActions.insertText(append)', sessionId: bridge.sessionId }
+              return noteInjectOk({ via: 'inputActions.insertText(append)', sessionId: bridge.sessionId }, sid)
             }
           }
         }
         if (typeof ia.setDraft === 'function') {
           ia.setDraft(before !== '' ? before + '\n' + full : full)
-          return { via: 'inputActions.setDraft', sessionId: bridge.sessionId }
+          return noteInjectOk({ via: 'inputActions.setDraft', sessionId: bridge.sessionId }, sid)
         }
       }
 
       // ③ 兜底：内核 conversation 服务
-      if (sid === undefined || sid === null || sid === '') throw new Error('无法确定当前会话 id')
-      var scoped2 = ctx.sessions.scope(sid)
-      if (scoped2 === undefined || scoped2 === null) throw new Error('会话 scope 不可用')
-      var shell2 = ctx.conversation.input.for(scoped2)
-      if (shell2 === undefined || shell2 === null) throw new Error('conversation.input.for() 未返回 shell')
+      if (scoped === null) {
+        var whyNo = '拿不到当前会话（试过：'
+          + (pick.tried.length === 0 ? '无候选' : pick.tried.join(',')) + '）'
+        noteInjectFail(whyNo)
+        throw new Error(whyNo)
+      }
+      var shell2 = ctx.conversation.input.for(scoped)
+      if (shell2 === undefined || shell2 === null) {
+        noteInjectFail('conversation.input.for() 未返回 shell')
+        throw new Error('conversation.input.for() 未返回 shell')
+      }
       var b2 = ''
       try { b2 = shell2.state.getSnapshot().draft || '' } catch (_) { b2 = '' }
       shell2.setDraft(b2 !== '' ? b2 + '\n' + full : full)
-      return { via: 'conversation.input.setDraft', sessionId: sid }
+      return noteInjectOk({ via: 'conversation.input.setDraft', sessionId: sid }, sid)
     }
 
     // ================================================================
@@ -1870,7 +1900,7 @@ window.__ModuleLoader__.load({
      * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
      * 体检卡片要靠它才能分清「用户装的是哪一版」。
      */
-    var F2C_VERSION = '1.1.3'
+    var F2C_VERSION = '1.1.4'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，
@@ -3253,6 +3283,39 @@ window.__ModuleLoader__.load({
       return out
     }
 
+    /**
+     * 选出一个**验证过**的会话上下文，拿不到就返回空。
+     *
+     * `prefer` 是调用方手上的读取器（或现成的 id）—— 聊天浮层传的是 overlay 建好
+     * 的 `readSessionId`，引用篮传的是一次读出来的字符串。两者都要能接。
+     *
+     * 验证用的是宿主自己的 `sessions.scope(id)`：**只有能取出会话的 id 才算数**。
+     * 猜错（拿着过期 id）时 `scope()` 会给 undefined，于是自动换下一个候选 ——
+     * 这正是 1.1.3 定下的规矩，2026-11-02 的「聊天批注按 Enter 没反应」也是
+     * 同一个病：`injectText` 当时直接信了 `bridge.sessionId`。
+     *
+     * @returns {{id: string, scoped: object|null, tried: string[]}} 永远返回对象；
+     *          `id` 为空且 `scoped` 为 null 表示一个候选都不成立。
+     */
+    function resolveScoped(ctx, prefer) {
+      var ids = []
+      var add = function (id) {
+        if (typeof id === 'string' && id !== '' && ids.indexOf(id) < 0) ids.push(id)
+      }
+      try { add(typeof prefer === 'function' ? prefer() : prefer) } catch (_) { /* 读取器抛错就跳过 */ }
+      var rest = []
+      try { rest = sessionCandidates() } catch (_) { rest = [] }
+      for (var i = 0; i < rest.length; i++) add(rest[i])
+      var tried = []
+      for (var j = 0; j < ids.length; j++) {
+        var scoped = null
+        try { scoped = ctx.sessions.scope(ids[j]) } catch (_) { scoped = null }
+        if (scoped !== null && scoped !== undefined) return { id: ids[j], scoped: scoped, tried: tried }
+        tried.push(ids[j].slice(0, 8))
+      }
+      return { id: '', scoped: null, tried: tried }
+    }
+
     /** 从折叠后的引用正文里抠出「打开哪个文件的第几行」。 */
     function parseQuoteTarget(body) {
       var text = String(body === null || body === undefined ? '' : body)
@@ -4582,6 +4645,7 @@ window.__ModuleLoader__.load({
           + ' 最近=' + PASTE_STAT.last
           + ' 壳=' + COMPOSER_WHY
           + ' 会话id=' + (currentSessionId() === '' ? '空' : '有'))
+        out.push('[引用] 次数=' + INJECT_STAT.n + ' 最近=' + INJECT_STAT.last)
         if (FOLD_ERRS.length > 0) {
           out.push('[折叠错误]')
           for (var e = 0; e < FOLD_ERRS.length; e++) out.push('  ' + FOLD_ERRS[e])
