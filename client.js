@@ -1653,12 +1653,15 @@ window.__ModuleLoader__.load({
                 // 胶囊已落地。此刻光标被 Lexical 放在最后一个插入节点之后
                 // （$replaceDetectSpanWithNodes 的明文契约），正好用来补批注。
                 var noteInline = false
-                if (noteBody !== '') noteInline = appendNoteAfterChip(noteBody)
+                if (noteBody !== '') noteInline = appendNoteAfterChip(noteBody, shell)
                 // 补不进去就把批注并回序列化正文 —— 输入框里看不到，但发出去的
                 // 内容仍然完整。注意正文此时只有「批注：」这个前缀，得把内容
                 // 一并写回去，否则会留下一个悬空的前缀。宁可少看，不可少发。
+                // 但**必须当场告诉用户**：批注被藏进胶囊这件事，他只有在发出去、
+                // 折成胶囊之后才发现（用户实测「会把我打的批注也吃进胶囊」）。
                 if (!noteInline && noteBody !== '') {
                   G.refBodies.set(ref, text + '\n\n批注：' + noteBody)
+                  pasteToast('批注没能单独显示，已随引用一起发出')
                 }
                 // 封膜：胶囊真正落地的这一刻，几乎可以断定用户接下来就是按发送。
                 // 直接在这里开膜，不依赖任何关于占位符码位的假设 —— 这是最可靠
@@ -1877,22 +1880,35 @@ window.__ModuleLoader__.load({
      * 这里只插**批注内容本身**：`\n\n批注：` 这个分隔前缀由胶囊的序列化正文
      * 携带（见 injectText 的 chipBody）。于是输入框里看到的是
      * `[胶囊] 批注内容`，而发出去的正文仍然是「引用块 + 空行 + 批注：内容」。
+     *
+     * 两条路，先 composer 自己的 `actions`，再退到座位桥 `bridge.inputActions`：
+     * 座位桥来自右栏的组件，**右栏关着时它是空的**。2026-11-02 用户实测：
+     * 聊天里划词批注 → 胶囊正常落进输入框，批注却被并进胶囊正文藏了起来
+     * （「会把我打的批注也吃进胶囊」）—— 就是只走了桥、桥为空直接返回 false。
+     * 而 `shell.actions` 与刚插入的胶囊在同一个已验证的会话作用域里，几乎总能写进去。
      * @returns 是否真的插进去了；false 时调用方会把批注并回引用正文。
      */
-    function appendNoteAfterChip(noteBody) {
-      var ia = bridge.inputActions
-      if (ia === null || ia === undefined) return false
-      if (typeof ia.captureInsertion !== 'function' || typeof ia.insertText !== 'function') return false
+    function appendNoteAfterChip(noteBody, shell) {
+      var faces = []
       try {
-        var span = ia.captureInsertion()
-        if (span === null || span === undefined) return false
-        // 只插内容：不换行、不要「批注」二字。胶囊插入时自带一个尾随空格，
-        // 正好把胶囊和批注隔开。
-        return ia.insertText(noteBody, span) !== false
-      } catch (e) {
-        console.warn('[file-to-chat] 批注未能作为草稿文本补入，改为并进引用正文', e)
-        return false
+        var act = shell !== null && shell !== undefined ? shell.actions : null
+        if (act !== null && act !== undefined) faces.push(act)
+      } catch (_) { /* actions 读不到就只走座位桥 */ }
+      if (bridge.inputActions !== null && bridge.inputActions !== undefined) faces.push(bridge.inputActions)
+      for (var i = 0; i < faces.length; i++) {
+        var ia = faces[i]
+        try {
+          if (typeof ia.captureInsertion !== 'function' || typeof ia.insertText !== 'function') continue
+          var span = ia.captureInsertion()
+          if (span === null || span === undefined) continue
+          // 只插内容：不换行、不要「批注」二字。胶囊插入时自带一个尾随空格，
+          // 正好把胶囊和批注隔开。
+          if (ia.insertText(noteBody, span) !== false) return true
+        } catch (e) {
+          console.warn('[file-to-chat] 批注补进草稿失败，换下一条路', e)
+        }
       }
+      return false
     }
 
     /**
@@ -1900,7 +1916,7 @@ window.__ModuleLoader__.load({
      * `test/meta.test.cjs` 会盯着这件事，改一处忘了另一处会让测试红。
      * 体检卡片要靠它才能分清「用户装的是哪一版」。
      */
-    var F2C_VERSION = '1.1.4'
+    var F2C_VERSION = '1.1.5'
 
     /** 输入框胶囊上的短标签：够认出是哪一个引用，又不撑爆一行。 */
     // 整份文件的内联上限。比选区的 MAX_EXCERPT_LINES 宽得多 —— 选区是「看这段」，

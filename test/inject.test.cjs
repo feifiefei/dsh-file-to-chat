@@ -27,8 +27,10 @@ const code = [
   'var bridge = { sessionId: null }',
   extract('function sessionCandidates()'),
   extract('function resolveScoped(ctx, prefer)'),
+  extract('function appendNoteAfterChip(noteBody, shell)'),
   'return {',
   '  resolveScoped: resolveScoped,',
+  '  appendNoteAfterChip: appendNoteAfterChip,',
   '  sessionCandidates: sessionCandidates,',
   '  G: G, bridge: bridge,',
   '}',
@@ -157,6 +159,52 @@ const LONG_C = 'cccccccc-1111-2222-3333-444444444444'
   const ctx = { sessions: { scope: function () { return only } } }
   const r = api.resolveScoped(ctx, LONG_A)
   ok('⑨ scoped 原样返回', r.scoped === only, r)
+}
+
+// ⑩-⑬ 批注补进草稿：优先 composer 自己的 actions（2026-11-02 的 1.1.5 修复）。
+// 右栏关着时 bridge.inputActions 是空的；以前只走桥，于是批注被并进胶囊正文里
+// 藏了起来（用户：「会把我打的批注也吃进胶囊」）。
+{
+  api.bridge.inputActions = null
+  let wrote = null
+  const shell = { actions: {
+    captureInsertion: function () { return { start: 1, end: 1, draftRev: 7 } },
+    insertText: function (t, s) { wrote = { t: t, s: s }; return true },
+  } }
+  const r = api.appendNoteAfterChip('看下这里', shell)
+  ok('⑩ 桥为空时走 shell.actions', r === true && wrote !== null && wrote.t === '看下这里', wrote)
+}
+
+{
+  const order = []
+  const shell = { actions: {
+    captureInsertion: function () { order.push('shell'); return { start: 0, end: 0, draftRev: 1 } },
+    insertText: function () { return true },
+  } }
+  api.bridge.inputActions = {
+    captureInsertion: function () { order.push('bridge'); return { start: 0, end: 0, draftRev: 1 } },
+    insertText: function () { return true },
+  }
+  const r = api.appendNoteAfterChip('x', shell)
+  ok('⑪ 两条路都在时先用 shell', r === true && order.length === 1 && order[0] === 'shell', order)
+}
+
+{
+  const shell = { actions: {
+    captureInsertion: function () { throw new Error('gone') },
+  } }
+  let hit = false
+  api.bridge.inputActions = {
+    captureInsertion: function () { return { start: 0, end: 0, draftRev: 2 } },
+    insertText: function () { hit = true; return true },
+  }
+  const r = api.appendNoteAfterChip('x', shell)
+  ok('⑫ shell 抛错时退回桥', r === true && hit === true, r)
+}
+
+{
+  api.bridge.inputActions = null
+  ok('⑬ 两条路都没有时返回 false（调用方会明说一次）', api.appendNoteAfterChip('x', null) === false)
 }
 
 console.log('\ninject: ' + pass + ' passed, ' + fail + ' failed')
